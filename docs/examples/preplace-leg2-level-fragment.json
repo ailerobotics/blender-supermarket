@@ -1,0 +1,71 @@
+{
+    "_comment": "sim-preplace-leg2-level-v1: the collect pre-place LEG-2 world-level fix + plan-derived phase budget. Captain's rule UNCHANGED: the box stays parallel to the ground, 2.0 deg bound / 0.15 s grace, NEVER loosened. coldwin56 (wrist-first sequencing) solved leg 1 (the wrist_2 starve) but FAILED leg 2 two ways: (A) the two-leg sequence needs ~150 s > the HARD-CODED 120 s phase_timeout (ros_host.py:165) -- timed out at 58% of leg 2; (B) the welded carton tilt rose 1.64 -> 2.02 deg across the pan descent (CARTON_TICK). This lane fixes BOTH. Scoped to the collect preplace under the station hold; default-off everywhere (hold off / wrist-first off => byte-identical).",
+    "_root_cause": {
+        "frame": "The base is HELD pitched -1.17 deg by the station parking brake (RUNTIME chassis_station_pitch_hold_pitch_deg), so ur_base_link +Z is off world +Z and shoulder_pan is a YAW about a tilted axis -- the carried carton sweeps a CONE as pan descends, so its WORLD tilt is not pan-invariant. The whole carton_level FK treated ur_base_link as world, so it levelled/measured in the BASE frame (parallel to the tilted base, not the ground).",
+        "droop_phantom": "coldwin56's gc droop feed-forward (K=2850) is a PHANTOM at the preplace: the GPU executed joints matched the commanded within 0.003 rad (the modelled ~0.016 rad shoulder/elbow sag never materialised). So solve_level_standoff(gc) PRE-TILTED the standoff wrist_1 ~+0.031 rad (1.77 deg base-frame) that nothing cancelled, leaving the carton ~1.8-2.0 deg off. The leg-2 wrist re-solve was ALSO a no-op in base frame: shoulder_pan is a perfect base-Z yaw, so the base-frame carton tilt is pan-INVARIANT -- re-solving returns the same wrists. The real lever is (1) drop the droop pre-tilt and (2) level/measure in WORLD.",
+        "cpu_reproduction": "FK of the coldwin56 executed joints reproduces the logged CARTON_TICK (base frame) to <0.05 deg (test_coldwin56_executed_joints_reproduce_the_2deg). The fix's geometric WORLD standoff + per-waypoint world re-solve stays <= 0.5 deg world across both legs; the OLD gc pre-tilted held-wrist path stays >1.6 deg (test_leg2_old_held_wrist_rises_new_resolved_stays_level)."
+    },
+    "_mechanism": {
+        "1_geometric_world_standoff": "controller._preplace_above_place_goal (preplace_level_gate + station hold): the standoff is solved GEOMETRICALLY (carton_level.level_place_ik, gravity_comp=None) in the WORLD frame (base_R from the hold) -- NO droop pre-tilt. Logs PREPLACE_LEVEL_GATE 'geometric world-level standoff ... droop feed-forward DISABLED'. CPU world tilt ~0.",
+        "2_per_waypoint_world_relevel": "controller._issue_gated_preplace_approach -> carton_level.plan_level_world_approach: every densified leg-2 waypoint (pan/lift/elbow moving) re-solves the wrist cluster for level-IN-WORLD (base_R), with NO droop pre-tilt, so the wrists track a continuously world-level orientation as pan sweeps the cone (leg 2 world tilt ~0.001). Leg 1's goal wrists are re-solved world-level at the carry pan too, so leg 1 ends world-level.",
+        "3_world_frame_measurement": "controller._carton_level_frame: the preplace trip/tick/CARTON_SEGMENT_TILT MEASURE in world (world up-axis + base_R). A WORLD-level carton reads ~2.3 deg in the BASE frame (base pitch counted twice) -- so a base-frame trip would FALSE-FIRE on the correctly-levelled carton; the world measurement reads ~0. Every OTHER phase (lift/tuck/place/release) keeps the base frame, byte-identical.",
+        "4_plan_derived_budget": "ros_host.py: the phase_timeout is DERIVED from the two legs' planned durations at the active caps + preplace_budget_margin_s (carton_level.preplace_phase_budget), floored at the historical 120 s, when preplace_wrist_first is on. CPU: plan ~110 s + margin 90 => ~200 s budget (coldwin56 measured 141 s SIM). Non-wrist-first keeps 120 s (byte-identical). config_preflight reports PREPLACE_PHASE_BUDGET and refuses an explicit phase_timeout_s below the plan.",
+        "5_convergence_guard_unchanged": "The PR 343 frozen-joint convergence guard (preplace_convergence_stall_s) is KEPT and still armed against each leg's own goal (it judges per-joint convergence to the current waypoint), so a genuinely frozen joint is still named PHASE_CONVERGENCE in seconds. The gate verdict line names the frame (geometric WORLD-level) and stays honest that the prediction is COMMANDED-only (drive-dynamics overshoot shows in CARTON_TICK)."
+    },
+    "env": {
+        "RESTOCK_PLACE_ON_DECK": "1",
+        "RESTOCK_COLLECT_GROUND_TRUTH": "1",
+        "RESTOCK_VERIFY_PLACE": "1",
+        "_note": "UNCHANGED from coldwin56. No new env switch."
+    },
+    "host_config": {
+        "_file": "scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py -> TransferController). The integration lane OWNS the actual run config; the keys below are the EXACT set this lane adds on top of the coldwin56 block.",
+        "preplace_wrist_first": true,
+        "preplace_convergence_stall_s": 30.0,
+        "carry_lift_shape": [1.2675, -2.27, 1.0, 0.65, 0.8, -1.2545],
+        "collect_place_preplace_shape": [0.093, -1.91, 2.014, -0.103, 1.664, 0.0],
+        "_kept_note": "preplace_wrist_first + the convergence guard + carry_lift_shape + collect_place_preplace_shape are KEPT from coldwin56 (leg 1 is clean). The host reads carry_lift_shape + collect_place_preplace_shape to DERIVE the phase budget at boot (and in config_preflight).",
+        "station_pitch_hold": true,
+        "station_hold_pitch_deg": -1.17,
+        "station_hold_roll_deg": 0.0,
+        "_station_hold_note": "NEW. The HOST MIRROR of the RUNTIME chassis_station_pitch_hold_* keys (manipulation.stations). They MUST MATCH the runtime values -- the host process reads only ros_host_config.json, so the carton-level FK needs its own copy of the held chassis attitude to level/measure the preplace in the WORLD frame. Absent/false => the base frame => byte-identical (the historical behaviour).",
+        "preplace_budget_margin_s": 90.0,
+        "_budget_margin_note": "NEW, OPTIONAL (default 90.0 s). Added to the plan-derived wrist-first preplace duration; the budget is max(120, plan + margin). Set higher if a run's SIM plan runs longer than the ~110 s caps estimate (coldwin56 measured 141 s; 141 + 90 is still well under the derived floor).",
+        "_phase_timeout_s_note": "OPTIONAL explicit override of the derived budget. Omit it to use the derivation. config_preflight REFUSES an explicit phase_timeout_s below the planned preplace duration (a plan that would time out).",
+        "carton_level": {
+            "preplace_level_gate": true,
+            "preplace_max_segment_rad": 0.08,
+            "preplace_approach_speed": 0.05,
+            "preplace_approach_accel": 0.05,
+            "preplace_above_support": true,
+            "preplace_support_clearance_m": 0.08,
+            "place_from_above": true,
+            "place_above_clearance_m": 0.08,
+            "place_contact_release": true,
+            "place_contact_gap_m": 0.012,
+            "gravity_compensation": {
+                "stiffness_nm_per_rad": 2850,
+                "carton_mass_kg": 0.45
+            },
+            "_carton_level_note": "KEPT from coldwin56. Under the station hold the preplace lane now solves the standoff + approach GEOMETRICALLY in WORLD (gravity_comp is NOT used at the preplace -- the coldwin56 phantom), while the gravity_compensation stays for the PLACE descent (base frame, unchanged). preplace_gate_bound_deg / preplace_max_segment_rad / preplace_approach_speed / preplace_approach_accel keep their coldwin56 values (0.08 max_segment_rad, 0.05/0.05 speed/accel)."
+        }
+    },
+    "runtime_config": {
+        "_file": "mission-runtime-*.json (EXTERNAL to the repo; the integration lane owns it). UNCHANGED from coldwin56.",
+        "manipulation": {
+            "stations": {
+                "chassis_station_pitch_hold": true,
+                "chassis_station_pitch_hold_pitch_deg": -1.17,
+                "chassis_station_pitch_hold_roll_deg": 0.0,
+                "_note": "UNCHANGED. The HOST station_pitch_hold / station_hold_pitch_deg / station_hold_roll_deg keys above MIRROR these."
+            }
+        }
+    },
+    "acceptance_coldwin57": {
+        "preplace_phase_budget": "CONFIG_PREFLIGHT prints PREPLACE_PHASE_BUDGET with plan ~110 s + margin => derived budget ~200 s; PREPLACE_PHASE_BUDGET also printed by the host at boot. Both legs converge within the budget (pan error <= 0.02 rad); no 'phase timeout: preplace'.",
+        "carton_level": "CARTON_TICK tilt peak <= 1.5 deg over both legs (now measured in WORLD -- the correctly-levelled carton reads ~0.0-0.6 deg); no CARTON_TILT trip. PREPLACE_LEVEL_GATE logs the geometric world-level standoff; CARTON_LEVEL_PREPLACE_GATE logs geometric WORLD-level per-leg predicted <= 1.0 deg.",
+        "place": "the full D6 lock engages at place start (base drift <= 0.02 m), the weld releases at true shelf contact (PLACE_CONTACT_RELEASE), verify_place passes, and the run ADVANCES PAST collect.",
+        "frames_note": "The CARTON_TICK/trip for the preplace is now WORLD-frame (parallel to the ground = the captain's rule). lift/tuck/place stay base-frame (byte-identical). The two frames differ by the base pitch (~1.17 deg), so the preplace CARTON_TICK may read ~1.2 deg LOWER than a base-frame reading of the same carton -- that is the fix, not a regression."
+    },
+    "reconciliation_with_worker_forensics": "coldwin56-leg2.txt attributed the 1.64->2.02 rise to the base-pitch cone and recommended a per-waypoint wrist re-solve. CPU analysis refines this: in the BASE frame (the frame the OLD CARTON_TICK logged) shoulder_pan is a perfect base-Z yaw, so the held-wrist base-frame tilt is pan-INVARIANT (~1.77, the gc pre-tilt) and the logged rise to 2.02 is the small executed wrist_1 drift; the base-pitch cone is the WORLD-frame term. Both findings converge on the SAME fix: drop the droop pre-tilt (geometric standoff) AND level/measure in WORLD. The worker's ~0.035 rad wrist_1 correction per waypoint matches the world-level re-solve's wrist travel."
+}

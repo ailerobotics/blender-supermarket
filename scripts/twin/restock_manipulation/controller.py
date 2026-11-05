@@ -117,7 +117,9 @@ class TransferController:
                  transfer_service_carry: bool = False,
                  esdf_boot_ack_grace_s: float = 0.0,
                  preplace_convergence_stall_s: float = 0.0, preplace_wrist_first: bool = False,
-                 carton_level=None, fk_urdf=None, place_tcp_link='gripper_pad_tcp'):
+                 carton_level=None, fk_urdf=None, place_tcp_link='gripper_pad_tcp',
+                 station_pitch_hold: bool = False, station_hold_roll_deg: float = 0.0,
+                 station_hold_pitch_deg: float = 0.0):
         self.steady_clock=steady_clock
         # sim-carton-level-place-on-cart-v1: the FK link the collect place-on-cart reach targets -- the
         # motion port's IK tcp ('gripper_pad_tcp'), NOT ur_tool0 (~0.27 m apart). The level place IK must
@@ -319,6 +321,7 @@ class TransferController:
         self._fk_urdf = fk_urdf                      # URDF path for the Isaac-free FK, or None
         self._fk_robot = None                        # lazily parsed Robot (first carried step)
         self._carton_up_in_tool = None               # the level carton up-axis in the tool frame, captured at the weld
+        self._carton_up_in_tool_world = None         # sim-preplace-leg2-level-v1: world-consistent up-axis (hold on)
         # sim-carton-tilt-transient-debounce-v1: a SUSTAINED-tilt debounce on the CARTON_TILT trip. The
         # measured carton tilt can spike over the bound for one-to-few ticks on a tracking/impulse
         # transient (collectacc1: the LIFT re-plan restart after a move_group respawn) while the planned
@@ -598,6 +601,21 @@ class TransferController:
         # joints move. Both opt-in (stall 0 / flag False => inert => byte-identical).
         self.preplace_wrist_first = bool(preplace_wrist_first)
         self._preplace_wristed = False   # wrist-first sub-stage flag (mirrors _retreat_lifted)
+        # sim-preplace-leg2-level-v1: the held chassis attitude during the station place. The collect place
+        # pins the base at a non-level parking-brake attitude (chassis_station_pitch_hold_pitch_deg /
+        # _roll_deg), so ur_base_link +Z is off world +Z and the shoulder_pan YAW axis is off vertical -- a
+        # pan sweep then carries the welded carton on a cone and the WORLD tilt is not pan-invariant
+        # (coldwin56 leg 2: held-wrist carton 1.64 -> 2.02). When the hold is active the carton-level FK
+        # measures / levels the preplace in the WORLD frame via this rotation, so "parallel to the ground"
+        # is the captain's world rule. Off => None => the base frame (byte-identical).
+        self.station_pitch_hold = bool(station_pitch_hold)
+        self.station_hold_roll_deg = float(station_hold_roll_deg)
+        self.station_hold_pitch_deg = float(station_hold_pitch_deg)
+        self._carton_base_R = None
+        if self.station_pitch_hold:
+            from twin.restock_manipulation import carton_level as _clbase
+            self._carton_base_R = _clbase.base_rotation_rp(self.station_hold_roll_deg,
+                                                           self.station_hold_pitch_deg)
         from twin.restock_manipulation.convergence_guard import ConvergenceGuard
         from twin.restock_manipulation.cad_tool import ARM_JOINTS as _ARM_JOINTS
         self._preplace_convergence = ConvergenceGuard(_ARM_JOINTS, stall_s=float(preplace_convergence_stall_s))
@@ -1020,6 +1038,16 @@ class TransferController:
         from twin.restock_manipulation import carton_level as cl
         R = cl.tool_rotation(robot, list(measured), self._carton_level.tool_link)
         self._carton_up_in_tool = cl.carton_up_in_tool(R)
+        # sim-preplace-leg2-level-v1: a SEPARATE world-consistent up-axis for the PREPLACE world-frame
+        # leveling ONLY (every other lane keeps the base-frame up above, byte-identical). The carton rested
+        # LEVEL IN WORLD at the weld while the chassis is held pitched, so the physically-correct carton
+        # up-axis in the tool frame is (base_R @ tool_R)^T @ world_up. Measuring/leveling the preplace with
+        # THIS up + base_R makes the welded carton parallel to the GROUND. None when the hold is off.
+        self._carton_up_in_tool_world = None
+        if self._carton_base_R is not None:
+            import numpy as _np
+            self._carton_up_in_tool_world = cl.carton_up_in_tool(
+                _np.asarray(self._carton_base_R, float) @ R)
 
     def _level_carried_goal(self, goal, measured):
         """A carried joint goal with its wrist cluster re-solved so the welded carton stays LEVEL (a
@@ -1213,14 +1241,30 @@ class TransferController:
         gc = self._place_gravity_compensation()
         limits = self._place_level_limits() or None
         tcp_link = self._place_fk_link(robot, list(leveled_goal))
+        base_R = self._carton_base_R
+        geometric_world = base_R is not None and self._carton_up_in_tool_world is not None
+        up_level = self._carton_up_in_tool_world if geometric_world else self._carton_up_in_tool
         try:
-            plan = cl.plan_compensated_approach(
-                robot, list(measured), list(leveled_goal), self._carton_up_in_tool, gc,
-                tool_link=tcp_link, limits=limits, bound_deg=cl_cfg.bound_deg,
-                max_segment_rad=cl_cfg.preplace_max_segment_rad, level_joints=cl_cfg.joints)
+            if geometric_world:
+                # sim-preplace-leg2-level-v1: GEOMETRIC, WORLD-level, densified approach -- re-solve the wrist
+                # cluster for level-IN-WORLD (held chassis attitude) at EVERY densified leg-2 waypoint, with NO
+                # droop pre-tilt (the coldwin56 phantom). This is the leg-2 fix: the wrists track a
+                # continuously world-level orientation as shoulder_pan sweeps on its tilted cone, instead of
+                # holding the leg-1 goal (which rose 1.64 -> 2.02 across the pan descent).
+                plan = cl.plan_level_world_approach(
+                    robot, list(measured), list(leveled_goal), up_level,
+                    tool_link=tcp_link, limits=limits, bound_deg=cl_cfg.bound_deg,
+                    max_segment_rad=cl_cfg.preplace_max_segment_rad, level_joints=cl_cfg.joints,
+                    base_R=base_R)
+            else:
+                plan = cl.plan_compensated_approach(
+                    robot, list(measured), list(leveled_goal), self._carton_up_in_tool, gc,
+                    tool_link=tcp_link, limits=limits, bound_deg=cl_cfg.bound_deg,
+                    max_segment_rad=cl_cfg.preplace_max_segment_rad, level_joints=cl_cfg.joints)
         except ValueError as exc:
-            print('CARTON_LEVEL_UNSOLVED phase=preplace: %s (no droop-compensated approach; falling back to '
-                  'the single leveled-endpoint approach)' % exc, flush=True)
+            print('CARTON_LEVEL_UNSOLVED phase=preplace: %s (no %s approach; falling back to '
+                  'the single leveled-endpoint approach)'
+                  % (exc, 'world-level' if geometric_world else 'droop-compensated'), flush=True)
             return self._issue_level_approach_move(leveled_goal, measured, slow=True, goal_tol=0.2)
         waypoints = list(plan.waypoints)
         cl_peak = None
@@ -1230,7 +1274,9 @@ class TransferController:
         # MODEL droop at the start, which a pre-compensated path has already cancelled, so anchoring would
         # DOUBLE-COUNT it and push the level path back off. This is a bounded residual backstop only (it barely
         # moves an already-level path); the compensation + dynamics cap are the primary mechanism.
-        clc = cl.ClosedLoopConfig.from_level(cl_cfg)
+        # The closed-loop residual backstop is a DROOP-MODEL servo; skip it on the geometric world-level lane
+        # (there is no droop pre-tilt to residually correct -- the world-level re-solve already zeros it).
+        clc = None if geometric_world else cl.ClosedLoopConfig.from_level(cl_cfg)
         if clc is not None and self._carton_up_in_tool is not None:
             clc = cl.ClosedLoopConfig(authority_deg=clc.authority_deg, rate_deg_per_s=clc.rate_deg_per_s,
                                       gain=clc.gain, joints=clc.joints, tool_link=tcp_link)
@@ -1259,14 +1305,18 @@ class TransferController:
         # SOFT carried-preplace profile (phase_drive.carried_soft_phases) + the wrist-sweep reduction, NOT
         # a tighter prediction; the honest caveat is stated here and the per-tick CARTON_TICK log + the
         # CARTON_SEGMENT_TILT phase=preplace exit line carry the EXECUTED truth.
+        frame_desc = ('geometric WORLD-level (base pitch=%.2f roll=%.2f deg) densified carried approach -- '
+                      'per-waypoint wrist re-solve for level-in-world, NO droop pre-tilt'
+                      % (self.station_hold_pitch_deg, self.station_hold_roll_deg)) if geometric_world else (
+                      'droop-compensated densified carried approach to the executed-level standoff; '
+                      'COMMANDED+droop only, BLIND to drive-dynamics overshoot')
         print('CARTON_LEVEL_PREPLACE_GATE n=%d predicted_executed max roll=%.2f pitch=%.2f tilt=%.2f deg '
-              '(target %.2f %s, bound %.2f) peak_joint_speed=%.3f rad/s peak_accel=%.3f rad/s^2%s -- '
-              'droop-compensated densified carried approach to the executed-level standoff; '
-              'COMMANDED+droop only, BLIND to drive-dynamics overshoot (see CARTON_TICK / CARTON_SEGMENT_TILT)'
+              '(target %.2f %s, bound %.2f) peak_joint_speed=%.3f rad/s peak_accel=%.3f rad/s^2%s -- %s '
+              '(see CARTON_TICK / CARTON_SEGMENT_TILT)'
               % (plan.waypoints_n, plan.max_roll, plan.max_pitch, plan.max_tilt, gate,
                  'within target' if worst <= gate else 'over target (sub-bound, dynamics cap + closed loop own it)',
                  cl_cfg.bound_deg, pk_v, pk_a,
-                 '' if cl_peak is None else ' closed_loop_peak=%.2f deg' % cl_peak), flush=True)
+                 '' if cl_peak is None else ' closed_loop_peak=%.2f deg' % cl_peak, frame_desc), flush=True)
         self.motion.begin_joint_path(list(waypoints), list(measured), slow=True, goal_tol=0.2,
                                      speed=cl_cfg.preplace_approach_speed,
                                      accel=cl_cfg.preplace_approach_accel)
@@ -1361,10 +1411,29 @@ class TransferController:
             gc = self._place_gravity_compensation()
             limits = self._place_level_limits() or None
             tcp_link = self._place_fk_link(robot, list(self.collect_place_preplace_shape))
-            if getattr(cl_cfg, 'preplace_level_gate', False):
-                # sim-preplace-level-gate-v1: PREFER the standoff branch with the smallest predicted
-                # EXECUTED (droop) tilt + most clearance (level_place_ik(gc) already returns an
-                # executed-level standoff, but ranks by nearest-seed, not executed tilt).
+            if (getattr(cl_cfg, 'preplace_level_gate', False) and self._carton_base_R is not None
+                    and self._carton_up_in_tool_world is not None):
+                # sim-preplace-leg2-level-v1: GEOMETRIC WORLD-level standoff under the held chassis attitude.
+                # coldwin56 proved the K=2850 droop feed-forward is a phantom at the preplace (the executed
+                # joints matched the commanded within 0.003 rad), so solve_level_standoff(gc) pre-tilted the
+                # standoff wrist_1 ~+0.031 rad and left the carton ~1.8-2.0 deg off level. Solve the standoff
+                # GEOMETRICALLY (gravity_comp=None) in the WORLD frame (base_R + the world up-axis) so the
+                # welded carton is parallel to the GROUND, not to the tilted base. Predicted world rpy ~0.
+                sol = cl.level_place_ik(robot, standoff, self._carton_up_in_tool_world,
+                                        list(self.collect_place_preplace_shape), tool_link=tcp_link,
+                                        limits=limits, gravity_comp=None, base_R=self._carton_base_R)
+                self._preplace_standoff_exec_rpy = cl.carried_rpy(
+                    robot, [float(sol[j]) for j in ARM_JOINTS], self._carton_up_in_tool_world,
+                    tool_link=tcp_link, base_R=self._carton_base_R)
+                print('PREPLACE_LEVEL_GATE geometric world-level standoff (base pitch=%.2f roll=%.2f deg; '
+                      'droop feed-forward DISABLED at preplace -- coldwin56 phantom): predicted world '
+                      'roll=%.2f pitch=%.2f tilt=%.2f deg'
+                      % (self.station_hold_pitch_deg, self.station_hold_roll_deg,
+                         self._preplace_standoff_exec_rpy[0], self._preplace_standoff_exec_rpy[1],
+                         self._preplace_standoff_exec_rpy[2]), flush=True)
+            elif getattr(cl_cfg, 'preplace_level_gate', False):
+                # sim-preplace-level-gate-v1 (level chassis / hold off): PREFER the standoff branch with the
+                # smallest predicted EXECUTED (droop) tilt + most clearance (byte-identical to the prior path).
                 sol, self._preplace_standoff_exec_rpy = cl.solve_level_standoff(
                     robot, standoff, self._carton_up_in_tool,
                     list(self.collect_place_preplace_shape), gc, tool_link=tcp_link, limits=limits)
@@ -1520,6 +1589,18 @@ class TransferController:
             return None
         return tuple(float(sol[j]) for j in ARM_JOINTS)
 
+    def _carton_level_frame(self, phase):
+        """sim-preplace-leg2-level-v1: the ``(up_in_tool, base_R)`` the carton-level measurement uses for
+        ``phase``. The collect PREPLACE under the held chassis attitude is levelled IN WORLD, so its trip /
+        tick / segment must MEASURE in world too (world up-axis + ``base_R``) -- otherwise the base-frame
+        metric reads the world-level carton ~2.3 deg off (the base pitch twice) and false-trips. Every other
+        phase (and the hold-off case) keeps the base frame, byte-identical. Returns the base-frame up and
+        ``None`` when the world up-axis is unavailable (never a silent frame mismatch)."""
+        if (phase == 'preplace' and self._carton_base_R is not None
+                and self._carton_up_in_tool_world is not None):
+            return self._carton_up_in_tool_world, self._carton_base_R
+        return self._carton_up_in_tool, None
+
     def _carton_tilt_trip(self, measured):
         """CARTON_TILT trip message when the welded carton (this carried pose) leaves level by more
         than the bound, else None. No-op when off / trip disabled / no FK / up-axis not yet captured."""
@@ -1529,8 +1610,9 @@ class TransferController:
         if robot is None or self._carton_up_in_tool is None:
             return None
         from twin.restock_manipulation import carton_level as cl
-        roll, pitch, _ = cl.carried_rpy(robot, list(measured), self._carton_up_in_tool,
-                                        self._carton_level.tool_link)
+        up, base_R = self._carton_level_frame(self.phase)
+        roll, pitch, _ = cl.carried_rpy(robot, list(measured), up,
+                                        self._carton_level.tool_link, base_R=base_R)
         out = cl.tilt_trip(roll, pitch, self._carton_level.bound_deg)
         return out[0] if out else None
 
@@ -1554,8 +1636,9 @@ class TransferController:
             self._tilt_debounce = cl.TiltDebounce(
                 bound_deg=self._carton_level.bound_deg,
                 grace_s=self._carton_level.tilt_grace_s * self._freshness_scale)
-        roll, pitch, tilt = cl.carried_rpy(robot, list(measured), self._carton_up_in_tool,
-                                           self._carton_level.tool_link)
+        up, base_R = self._carton_level_frame(self.phase)
+        roll, pitch, tilt = cl.carried_rpy(robot, list(measured), up,
+                                           self._carton_level.tool_link, base_R=base_R)
         # sim-carton-level-preplace-v2: accumulate the EXECUTED max |roll|,|pitch| for this carried
         # phase (reported vs the planned peak at the phase exit). Cheap (reuses this tick's FK read).
         er, ep = self._carton_seg_exec.get(self.phase, (0.0, 0.0))
@@ -1582,8 +1665,9 @@ class TransferController:
         if robot is None or self._carton_up_in_tool is None:
             return
         from twin.restock_manipulation import carton_level as cl
-        roll, pitch, _ = cl.carried_rpy(robot, list(measured), self._carton_up_in_tool,
-                                        self._carton_level.tool_link)
+        up, base_R = self._carton_level_frame(phase)
+        roll, pitch, _ = cl.carried_rpy(robot, list(measured), up,
+                                        self._carton_level.tool_link, base_R=base_R)
         er, ep = self._carton_seg_exec.get(phase, (0.0, 0.0))
         self._carton_seg_exec[phase] = (max(er, abs(roll)), max(ep, abs(pitch)))
 
@@ -2260,6 +2344,28 @@ class TransferController:
                     if self.preplace_wrist_first and not self._preplace_wristed:
                         from twin.restock_manipulation.preplace_sequence import wrist_first_subgoals
                         preplace_shape, _ = wrist_first_subgoals(s.joint_positions, preplace_shape)
+                        # sim-preplace-leg2-level-v1: under the held chassis attitude the standoff wrists are
+                        # world-level only AT the standoff pan; held at the CARRY pan (leg 1) they sit off the
+                        # cone, so re-solve the leg-1 goal's wrist cluster for level-IN-WORLD at the carry pan
+                        # (lift/elbow stay at the standoff). Then leg 1 ends world-level and leg 2's pan sweep
+                        # stays world-level throughout. base_R None (hold off) => the standoff wrists verbatim
+                        # (byte-identical to the prior wrist-first leg 1).
+                        if self._carton_base_R is not None and self._carton_up_in_tool_world is not None:
+                            from twin.restock_manipulation import carton_level as _cl1
+                            from twin.restock_manipulation.cad_tool import ARM_JOINTS as _AJ1
+                            _robot = self._fk_model()
+                            if _robot is not None:
+                                try:
+                                    _tcp = self._place_fk_link(_robot, list(preplace_shape))
+                                    _lev = _cl1.level_config(
+                                        _robot, list(preplace_shape), self._carton_up_in_tool_world,
+                                        joints=self._carton_level.joints, tool_link=_tcp,
+                                        limits=self._place_level_limits() or None,
+                                        accept_deg=self._carton_level.bound_deg, base_R=self._carton_base_R)
+                                    preplace_shape = tuple(float(_lev[j]) for j in _AJ1)
+                                except ValueError as _exc:
+                                    print('PREPLACE_WRIST_FIRST leg-1 world-level unsolved: %s '
+                                          '(using the standoff wrists; CARTON_TILT owns it)' % _exc, flush=True)
                         print('PREPLACE_WRIST_FIRST leg 1: driving the wrists + leveling cluster to the '
                               'standoff while shoulder_pan holds at carry (sim-preplace-per-joint-gains-v1)',
                               flush=True)

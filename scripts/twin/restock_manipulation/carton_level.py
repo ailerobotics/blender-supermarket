@@ -73,6 +73,38 @@ DEFAULT_LEVEL_JOINTS = ('ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_join
 WORLD_UP = np.array([0.0, 0.0, 1.0])
 
 
+# ---------------------------------------------------- held chassis attitude (sim-preplace-leg2-level-v1)
+# The carton-level FK is rooted at ``ur_base_link``, which the whole module treated as world-aligned. During
+# the collect place the base is NOT level: the station parking brake pins the chassis at a held attitude
+# (``chassis_station_pitch_hold_pitch_deg`` / ``_roll_deg``, default pitch -1.17 deg), so ``ur_base_link`` +Z
+# is tilted from world +Z and the shoulder_pan YAW axis is off vertical -- a pan sweep then carries the welded
+# carton on a cone and the WORLD tilt is NOT pan-invariant even though the base-frame tilt is (coldwin56
+# leg 2: the executed held-wrist carton rose 1.64 -> 2.02 across the pan descent). ``base_R`` is the 3x3
+# world<-base rotation of the held chassis; when supplied, every leveling residual and tilt measurement is
+# taken in the WORLD frame (``base_R @ up_world_base`` vs world +Z) so "parallel to the ground" is the
+# captain's world rule, not the base frame. Default ``None`` => identity => byte-identical (the historical
+# base-frame behaviour).
+
+def base_rotation_rp(roll_deg, pitch_deg):
+    """The 3x3 world<-base rotation of a chassis held at ``roll_deg`` / ``pitch_deg`` (yaw is irrelevant to
+    tilt-from-vertical, so it is omitted): ``Ry(pitch) @ Rx(roll)``. Pure/CPU. Returns ``None`` for a level
+    chassis (both ~0) so callers stay byte-identical."""
+    r = math.radians(float(roll_deg)); p = math.radians(float(pitch_deg))
+    if abs(r) < 1e-12 and abs(p) < 1e-12:
+        return None
+    Rx = np.array([[1.0, 0.0, 0.0], [0.0, math.cos(r), -math.sin(r)], [0.0, math.sin(r), math.cos(r)]])
+    Ry = np.array([[math.cos(p), 0.0, math.sin(p)], [0.0, 1.0, 0.0], [-math.sin(p), 0.0, math.cos(p)]])
+    return Ry @ Rx
+
+
+def _apply_base(base_R, up_base):
+    """``up_base`` expressed in world: ``base_R @ up_base`` (or ``up_base`` verbatim when ``base_R`` is
+    None/identity)."""
+    if base_R is None:
+        return up_base
+    return np.asarray(base_R, float) @ np.asarray(up_base, float)
+
+
 # --------------------------------------------------------------------- decompose
 
 def _unit(v):
@@ -206,14 +238,16 @@ def carton_up_in_tool(tool_R_weld):
     return _unit(R.T @ WORLD_UP)
 
 
-def carried_up_world(robot, config, up_in_tool, tool_link='ur_tool0', root='ur_base_link'):
-    """World up-axis of the carried carton at ``config``: ``tool_R(config) @ up_in_tool``."""
-    return tool_rotation(robot, config, tool_link, root) @ _unit(up_in_tool)
+def carried_up_world(robot, config, up_in_tool, tool_link='ur_tool0', root='ur_base_link', base_R=None):
+    """World up-axis of the carried carton at ``config``: ``base_R @ tool_R(config) @ up_in_tool`` (the held
+    chassis attitude ``base_R`` folded in; None => the base frame, byte-identical)."""
+    return _apply_base(base_R, tool_rotation(robot, config, tool_link, root) @ _unit(up_in_tool))
 
 
-def carried_rpy(robot, config, up_in_tool, tool_link='ur_tool0', root='ur_base_link'):
-    """(roll_deg, pitch_deg, tilt_deg) of the carried carton at arm ``config``."""
-    return up_axis_rpy(carried_up_world(robot, config, up_in_tool, tool_link, root))
+def carried_rpy(robot, config, up_in_tool, tool_link='ur_tool0', root='ur_base_link', base_R=None):
+    """(roll_deg, pitch_deg, tilt_deg) of the carried carton at arm ``config``, in the WORLD frame when the
+    held chassis attitude ``base_R`` is given (else the base frame)."""
+    return up_axis_rpy(carried_up_world(robot, config, up_in_tool, tool_link, root, base_R=base_R))
 
 
 # --------------------------------------------------------------------- leveling
@@ -560,7 +594,7 @@ _W2_SEED_GRID = (0.0, math.pi / 2, math.pi)
 
 def level_config(robot, goal_config, up_in_tool, *, joints=DEFAULT_LEVEL_JOINTS,
                  tool_link='ur_tool0', root='ur_base_link', limits=None,
-                 max_iter=80, tol_deg=0.05, accept_deg=None):
+                 max_iter=80, tol_deg=0.05, accept_deg=None, base_R=None):
     """Re-solve ``joints`` of ``goal_config`` so the carried carton's up-axis points world-up (a
     level-orientation waypoint). Returns a new joint map. Position (pan/lift/elbow) is untouched;
     only the wrist cluster moves, so the tool stays where the carry plan put it and the carton is
@@ -590,7 +624,7 @@ def level_config(robot, goal_config, up_in_tool, *, joints=DEFAULT_LEVEL_JOINTS,
     accept = float(tol_deg if accept_deg is None else accept_deg)
 
     def up_world(cfgmap):
-        return tool_rotation(robot, cfgmap, tool_link, root) @ u
+        return _apply_base(base_R, tool_rotation(robot, cfgmap, tool_link, root) @ u)
 
     def tilt_deg(cfgmap):
         uw = up_world(cfgmap)
@@ -693,7 +727,7 @@ def _as_vec(cfg):
 
 
 def predict_path_tilt(robot, waypoints, up_in_tool, *, tool_link='ur_tool0', root='ur_base_link',
-                      interior=8):
+                      interior=8, base_R=None):
     """Replay the carton attitude along an EXECUTED leveled waypoint path and return
     ``(max_abs_roll_deg, max_abs_pitch_deg, max_tilt_deg)``.
 
@@ -705,11 +739,11 @@ def predict_path_tilt(robot, waypoints, up_in_tool, *, tool_link='ur_tool0', roo
     samples per segment catches a tilt that the leveled ENDPOINTS hide but the interpolation passes through
     (the wrist-branch transition). Pure/CPU."""
     return predict_path_tilt_executed(robot, waypoints, up_in_tool, tool_link=tool_link, root=root,
-                                      interior=interior, gravity_comp=None)
+                                      interior=interior, gravity_comp=None, base_R=base_R)
 
 
 def predict_path_tilt_executed(robot, waypoints, up_in_tool, *, tool_link='ur_tool0',
-                               root='ur_base_link', interior=8, gravity_comp=None):
+                               root='ur_base_link', interior=8, gravity_comp=None, base_R=None):
     """``predict_path_tilt`` with the loaded gravity droop applied (sim-carton-level-southdock-v1).
 
     When ``gravity_comp`` is a ``GravityCompensation`` each sampled COMMANDED config ``q`` is evaluated at
@@ -732,7 +766,7 @@ def predict_path_tilt_executed(robot, waypoints, up_in_tool, *, tool_link='ur_to
         for k in range(interior + 1):
             a = k / float(interior)
             q = [(1 - a) * pts[i][j] + a * pts[i + 1][j] for j in range(6)]
-            roll, pitch, tilt = carried_rpy(robot, executed(q), up_in_tool, tool_link, root)
+            roll, pitch, tilt = carried_rpy(robot, executed(q), up_in_tool, tool_link, root, base_R=base_R)
             mr = max(mr, abs(roll)); mp = max(mp, abs(pitch)); mt = max(mt, tilt)
     return mr, mp, mt
 
@@ -966,6 +1000,40 @@ def densify_count(start_config, goal_config, max_segment_rad):
     return max(2, int(math.ceil(dmax / float(max_segment_rad))))
 
 
+def wrist_first_leg_durations(carry, standoff, *, speed=0.05, accel=0.1, max_segment_rad=0.25):
+    """The planned SIM durations (seconds) of the two wrist-first preplace legs at the active caps
+    (sim-preplace-leg2-level-v1, part 2). Leg 1 sweeps every joint except shoulder_pan from ``carry`` to
+    ``standoff`` while the pan holds; leg 2 moves the pan to ``standoff``. Each leg is densified
+    (:func:`densify_count` at ``max_segment_rad``) and timed with the EXACT executor rest-to-rest
+    segment-time formula (:func:`_waypoints_segment_times`, the same ``ros_adapter`` the real move runs), so
+    the sum is the planned preplace duration the phase budget must cover. Returns ``(leg1_s, leg2_s)``.
+    Pure/CPU."""
+    c = _as_vec(_as_joint_map(carry))
+    g = _as_vec(_as_joint_map(standoff))
+    leg1_goal = list(g); leg1_goal[0] = c[0]            # pan held at carry through leg 1
+
+    def leg_time(a, b):
+        n = densify_count(a, b, max_segment_rad)
+        wps = [[(1 - t / float(n)) * a[i] + (t / float(n)) * b[i] for i in range(6)] for t in range(n + 1)]
+        return float(sum(_waypoints_segment_times(wps, speed, accel)))
+
+    return leg_time(c, leg1_goal), leg_time(leg1_goal, g)
+
+
+def preplace_phase_budget(carry, standoff, *, speed=0.05, accel=0.1, max_segment_rad=0.25,
+                          margin_s=90.0, floor_s=120.0):
+    """The wrist-first preplace PHASE budget (SIM seconds): ``max(floor_s, leg1 + leg2 + margin_s)``
+    (sim-preplace-leg2-level-v1, part 2). The two-leg wrist-first sequence legitimately needs ~150 s at the
+    caps -- well over the legacy hard-coded 120 s phase_timeout (coldwin56 timed out at 58 % of leg 2) --
+    so the budget is derived from the planned leg durations (:func:`wrist_first_leg_durations`) plus a
+    configurable margin, never below ``floor_s`` (so a short plan never shrinks the historical 120 s).
+    Returns ``(budget_s, plan_s, leg1_s, leg2_s)``. Pure/CPU."""
+    l1, l2 = wrist_first_leg_durations(carry, standoff, speed=speed, accel=accel,
+                                       max_segment_rad=max_segment_rad)
+    plan = l1 + l2
+    return max(float(floor_s), plan + float(margin_s)), plan, l1, l2
+
+
 def plan_compensated_approach(robot, start_config, leveled_goal, up_in_tool, gc, *, joints=None,
                               tool_link='ur_tool0', root='ur_base_link', limits=None,
                               bound_deg=DEFAULT_TILT_BOUND_DEG, max_segment_rad=0.25, interior=8,
@@ -1020,6 +1088,48 @@ def plan_compensated_approach(robot, start_config, leveled_goal, up_in_tool, gc,
     vecs[-1] = list(gvec)   # pin the executed-level standoff verbatim
     mr, mp, mt = predict_path_tilt_executed(robot, vecs, up_in_tool, tool_link=tool_link, root=root,
                                             interior=interior, gravity_comp=gc)
+    return LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs), max_roll=mr, max_pitch=mp,
+                         max_tilt=mt, waypoints_n=n)
+
+
+def plan_level_world_approach(robot, start_config, leveled_goal, up_in_tool, *, joints=None,
+                              tool_link='ur_tool0', root='ur_base_link', limits=None,
+                              bound_deg=DEFAULT_TILT_BOUND_DEG, max_segment_rad=0.25, interior=8,
+                              level_joints=DEFAULT_LEVEL_JOINTS, base_R=None):
+    """Plan the carried pre-place APPROACH from ``start_config`` to an ALREADY-LEVELED standoff
+    ``leveled_goal`` as a GEOMETRIC, DENSIFIED, WORLD-level waypoint path (sim-preplace-leg2-level-v1).
+
+    The droop-free counterpart of :func:`plan_compensated_approach`: coldwin56 proved the K=2850 droop
+    feed-forward is a PHANTOM at the preplace (the GPU executed joints matched the commanded within
+    0.003 rad -> the modelled ~0.016 rad shoulder/elbow sag never materialised), so the gc path pre-tilted
+    the standoff wrist_1 by ~+0.031 rad and left the welded carton ~1.8-2.0 deg off. Here each densified
+    interior waypoint is GEOMETRICALLY re-levelled (``level_config``) in the WORLD frame (``base_R`` folds in
+    the held chassis attitude so the carton tracks level in world as the shoulder_pan sweeps on its tilted
+    cone), with NO droop pre-tilt. The first waypoint is pinned to ``start_config`` verbatim
+    (``begin_joint_path`` requires it) and the last to ``leveled_goal`` (the already-world-level standoff).
+    Returns a ``LevelPathPlan`` whose ``max_*`` are the predicted WORLD-frame extremes (what the captain's
+    "parallel to the ground" rule reads). Raises ValueError only when an interior waypoint has no in-``limits``
+    world-level solution. Pure/CPU."""
+    start = _as_joint_map(start_config)
+    svec = _as_vec(start)
+    gvec = _as_vec(_as_joint_map(leveled_goal))
+    n = densify_count(svec, gvec, max_segment_rad)
+    vecs = [list(svec)]
+    seed = None
+    for i in range(1, n + 1):
+        a = i / float(n)
+        base = {j: (1 - a) * svec[k] + a * gvec[k] for k, j in enumerate(_ARM_ORDER())}
+        if seed is not None:
+            for j in level_joints:
+                if j in base and j in seed:
+                    base[j] = seed[j]
+        glev = level_config(robot, base, up_in_tool, joints=level_joints, tool_link=tool_link,
+                            root=root, limits=limits, accept_deg=bound_deg, base_R=base_R)
+        vecs.append(_as_vec(glev))
+        seed = glev
+    vecs[-1] = list(gvec)   # pin the world-level standoff verbatim
+    mr, mp, mt = predict_path_tilt_executed(robot, vecs, up_in_tool, tool_link=tool_link, root=root,
+                                            interior=interior, gravity_comp=None, base_R=base_R)
     return LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs), max_roll=mr, max_pitch=mp,
                          max_tilt=mt, waypoints_n=n)
 
@@ -1255,7 +1365,7 @@ class GravityCompensation:
         return {j: max(-lim, min(lim, -tau[j] / self.stiffness)) for j in tau}
 
     def wrist_feedforward(self, robot, command, up_in_tool, *, tool_link=None, root='ur_base_link',
-                          limits=None, accept_deg=None):
+                          limits=None, accept_deg=None, base_R=None):
         """sim-carton-level-setdown-v1: realise the droop-cancellation on the TRACKING ``correct_joints``.
 
         Given a geometrically-level COMMAND (reach + level, e.g. the output of the gc-free ``level_place_ik``),
@@ -1274,7 +1384,7 @@ class GravityCompensation:
         sag = self.droop(robot, cmd, tool_link=tl, root=root)
         settled = {j: cmd[j] + sag.get(j, 0.0) for j in cmd}
         wrist_sol = level_config(robot, settled, up_in_tool, joints=self.correct_joints, tool_link=tl,
-                                 root=root, limits=limits, accept_deg=accept_deg)
+                                 root=root, limits=limits, accept_deg=accept_deg, base_R=base_R)
         out = dict(cmd)
         for j in self.correct_joints:
             if j in wrist_sol:
@@ -1328,7 +1438,7 @@ _W3_SEED_GRID = tuple(np.linspace(-math.pi, math.pi, 9))
 
 def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
                    tool_link='ur_tool0', root='ur_base_link', limits=None, max_iter=200,
-                   pos_tol=1e-3, tilt_tol_deg=0.05, w_ori=1.0, gravity_comp=None):
+                   pos_tol=1e-3, tilt_tol_deg=0.05, w_ori=1.0, gravity_comp=None, base_R=None):
     """Re-plan a carried place pose that is BOTH at ``target_pos`` (tool origin in ``root``) AND level
     (carton up-axis world +Z) -- the fix PR 287 flagged as a follow-up: wrist-ONLY leveling of a
     reach-authored place shape holds the attitude but shifts the TCP ~0.2-0.5 m and loses the deck
@@ -1355,9 +1465,10 @@ def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
     if gravity_comp is not None:
         geom = level_place_ik(robot, target_pos, up_in_tool, seed_config, joints=joints,
                               tool_link=tool_link, root=root, limits=limits, max_iter=max_iter,
-                              pos_tol=pos_tol, tilt_tol_deg=tilt_tol_deg, w_ori=w_ori, gravity_comp=None)
+                              pos_tol=pos_tol, tilt_tol_deg=tilt_tol_deg, w_ori=w_ori, gravity_comp=None,
+                              base_R=base_R)
         return gravity_comp.wrist_feedforward(robot, geom, up_in_tool, tool_link=tool_link, root=root,
-                                              limits=limits, accept_deg=DEFAULT_TILT_BOUND_DEG)
+                                              limits=limits, accept_deg=DEFAULT_TILT_BOUND_DEG, base_R=base_R)
     cfg = _as_joint_map(seed_config)
     adj = list(joints) if joints is not None else list(ARM_JOINTS)
     adj = [j for j in adj if j in cfg]
@@ -1377,7 +1488,7 @@ def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
 
     def state(cfgmap):
         T = tool_transform(robot, _executed(cfgmap), tool_link, root)
-        return T[:3, 3], T[:3, :3] @ u
+        return T[:3, 3], _apply_base(base_R, T[:3, :3] @ u)
 
     def residual(cfgmap):
         p, uw = state(cfgmap)
