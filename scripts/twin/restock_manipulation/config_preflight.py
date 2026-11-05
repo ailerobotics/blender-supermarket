@@ -270,6 +270,19 @@ def check_carton_level(host_cfg):
             "REGRESSES the collect set-down -- its above-place IK drifts the welded carton ~93 mm toward "
             "the +x mouth so the pad strikes post_2 at an edge (coldwin41 CARTON_TILT 4.94 deg). Turn it "
             "OFF and use the least-extended approach + 'closed_loop_level' + 'place_clearance_drooped'.")
+    # sim-preplace-level-gate-v1: the preplace carton-level GATE only ENGAGES when the collect preplace
+    # standoff is re-targeted above the support (_preplace_above_place_goal -> preplace_above_support /
+    # preplace_above_place). A gate ON with neither above-flag is SILENTLY INERT (the host-vs-runtime /
+    # key-in-the-wrong-place class of bug), so refuse it loudly at pre-flight rather than ship a run that
+    # believes it is gated but drives the ungated single-goal approach.
+    if getattr(resolved, 'preplace_level_gate', False) \
+            and not (getattr(resolved, 'preplace_above_support', False) or resolved.preplace_above_place):
+        problems.append(
+            "carton_level 'preplace_level_gate' is ON but neither 'preplace_above_support' nor "
+            "'preplace_above_place' is set: the gate engages only on the re-targeted above-support preplace "
+            "standoff (_preplace_above_place_goal), so with neither it is silently inert. Set "
+            "'preplace_above_support': true (the shelf-correct lane) so the droop-compensated, densified, "
+            "speed/accel-capped carried approach actually drives the preplace.")
     return problems
 
 
