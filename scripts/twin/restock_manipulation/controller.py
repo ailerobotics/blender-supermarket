@@ -611,6 +611,9 @@ class TransferController:
         # set when _preplace_above_place_goal engages (for the engaged-standoff log).
         self._preplace_above_mode = None
         self._preplace_above_clearance = None
+        # sim-preplace-level-gate-v1: the predicted EXECUTED (droop) attitude of the solved standoff, set by
+        # _preplace_above_place_goal when the gate is on (for the approach-gate logging).
+        self._preplace_standoff_exec_rpy = None
         # sim-place-release-serialization-v1: the contact-triggered weld release must be a proper PHASE
         # transition, not a scene mutation issued mid place-execute (coldwin43: the detach ran while the
         # place ExecuteTrajectory was still in flight -> 'planning-scene mutation issued while a plan/execute
@@ -1166,6 +1169,79 @@ class TransferController:
         self.issued = True
         return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
 
+    def _issue_gated_preplace_approach(self, leveled_goal, measured):
+        """sim-preplace-level-gate-v1: dispatch the carried pre-place APPROACH to the executed-level standoff
+        ``leveled_goal`` as a DROOP-COMPENSATED, DENSIFIED, speed/accel-capped leveled ``begin_joint_path``,
+        gated on the predicted EXECUTED (droop) tilt and, when ``closed_loop_level`` is on, backed by the
+        bounded sensor servo. The coldwin50 fix: ``_issue_level_approach_move`` levels the interior wrists only
+        GEOMETRICALLY (so the EXECUTED interior still drooped ~1.8 deg) and replays a GEOMETRIC gate (droop-
+        blind), and the move was a coarse FAST sweep (run-to-run dynamic deflection -> +7.64 deg). Here the
+        approach interior is wrist-droop-cancelled per waypoint (EXECUTED-level throughout), densified so each
+        segment's step is small (less dynamic deflection), and time-capped at the carried speed/accel. Refuses
+        before motion (CARTON_LEVEL_PLAN_REJECTED) only when the compensated executed path would still exceed
+        the TRUE ``bound_deg``; a sub-bound residual over the tighter ``preplace_gate_bound_deg`` target is
+        logged (the dynamics cap + closed loop own it) rather than blocking a healthy run. Falls back to
+        ``_issue_level_approach_move`` when no FK model / up-axis / compensated solution (never a silent tilt)."""
+        from twin.restock_manipulation import carton_level as cl
+        cl_cfg = self._carton_level
+        robot = self._fk_model()
+        if robot is None or self._carton_up_in_tool is None:
+            return self._issue_level_approach_move(leveled_goal, measured, slow=True, goal_tol=0.2)
+        gc = self._place_gravity_compensation()
+        limits = self._place_level_limits() or None
+        tcp_link = self._place_fk_link(robot, list(leveled_goal))
+        try:
+            plan = cl.plan_compensated_approach(
+                robot, list(measured), list(leveled_goal), self._carton_up_in_tool, gc,
+                tool_link=tcp_link, limits=limits, bound_deg=cl_cfg.bound_deg,
+                max_segment_rad=cl_cfg.preplace_max_segment_rad, level_joints=cl_cfg.joints)
+        except ValueError as exc:
+            print('CARTON_LEVEL_UNSOLVED phase=preplace: %s (no droop-compensated approach; falling back to '
+                  'the single leveled-endpoint approach)' % exc, flush=True)
+            return self._issue_level_approach_move(leveled_goal, measured, slow=True, goal_tol=0.2)
+        waypoints = list(plan.waypoints)
+        cl_peak = None
+        # Extend the bounded closed-loop leveller to the approach (opt-in via closed_loop_level). The approach
+        # interior is ALREADY droop-compensated (plan_compensated_approach), so use the MODEL closed loop
+        # (CartonLevelServo.correct_path), NOT the sensor-anchored variant: the sensor anchor biases on the
+        # MODEL droop at the start, which a pre-compensated path has already cancelled, so anchoring would
+        # DOUBLE-COUNT it and push the level path back off. This is a bounded residual backstop only (it barely
+        # moves an already-level path); the compensation + dynamics cap are the primary mechanism.
+        clc = cl.ClosedLoopConfig.from_level(cl_cfg)
+        if clc is not None and self._carton_up_in_tool is not None:
+            clc = cl.ClosedLoopConfig(authority_deg=clc.authority_deg, rate_deg_per_s=clc.rate_deg_per_s,
+                                      gain=clc.gain, joints=clc.joints, tool_link=tcp_link)
+            servo = cl.CartonLevelServo(robot, self._carton_up_in_tool, clc)
+            waypoints = servo.correct_path([list(w) for w in waypoints], gc)
+            waypoints[0] = list(measured)            # the executor starts exactly where the arm is
+            waypoints[-1] = [float(v) for v in leveled_goal]   # keep the solved executed-level standoff
+            cl_peak = math.degrees(max((abs(v) for v in servo.accumulated.values()), default=0.0))
+            mr, mp, mt = cl.predict_path_tilt_executed(robot, waypoints, self._carton_up_in_tool,
+                                                       tool_link=tcp_link, gravity_comp=gc)
+            plan = cl.LevelPathPlan(waypoints=tuple(tuple(v) for v in waypoints), max_roll=mr,
+                                    max_pitch=mp, max_tilt=mt, waypoints_n=plan.waypoints_n)
+        reject = plan.reject(cl_cfg.bound_deg)
+        if reject is not None:
+            print(reject, flush=True)
+            return self._fail(reject)
+        pk_v, pk_a = cl.path_peak_joint_speed(waypoints, speed=cl_cfg.preplace_approach_speed,
+                                              accel=cl_cfg.preplace_approach_accel)
+        worst = max(plan.max_roll, plan.max_pitch)
+        gate = cl_cfg.preplace_gate_bound_deg
+        self._carton_seg_planned['preplace'] = (plan.max_roll, plan.max_pitch)  # for CARTON_SEGMENT_TILT
+        print('CARTON_LEVEL_PREPLACE_GATE n=%d predicted_executed max roll=%.2f pitch=%.2f tilt=%.2f deg '
+              '(target %.2f %s, bound %.2f) peak_joint_speed=%.3f rad/s peak_accel=%.3f rad/s^2%s -- '
+              'droop-compensated densified carried approach to the executed-level standoff'
+              % (plan.waypoints_n, plan.max_roll, plan.max_pitch, plan.max_tilt, gate,
+                 'within target' if worst <= gate else 'over target (sub-bound, dynamics cap + closed loop own it)',
+                 cl_cfg.bound_deg, pk_v, pk_a,
+                 '' if cl_peak is None else ' closed_loop_peak=%.2f deg' % cl_peak), flush=True)
+        self.motion.begin_joint_path(list(waypoints), list(measured), slow=True, goal_tol=0.2,
+                                     speed=cl_cfg.preplace_approach_speed,
+                                     accel=cl_cfg.preplace_approach_accel)
+        self.issued = True
+        return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+
     def _place_level_limits(self):
         """Joint limits for the level place IK: the clear carry wrist region (carry_wrist1_cap /
         carry_wrist2_min, so the level pose stays off the ur_wrist_2-vs-forearm stop) plus the arm's
@@ -1249,13 +1325,22 @@ class TransferController:
         clearance = (cl_cfg.preplace_support_clearance() if above_support
                      else float(cl_cfg.preplace_standoff_m))
         standoff = (float(place[0]), float(place[1]), float(place[2]) + float(clearance))
+        self._preplace_standoff_exec_rpy = None
         try:
             gc = self._place_gravity_compensation()
             limits = self._place_level_limits() or None
             tcp_link = self._place_fk_link(robot, list(self.collect_place_preplace_shape))
-            sol = cl.level_place_ik(robot, standoff, self._carton_up_in_tool,
-                                    list(self.collect_place_preplace_shape), tool_link=tcp_link,
-                                    limits=limits, gravity_comp=gc)
+            if getattr(cl_cfg, 'preplace_level_gate', False):
+                # sim-preplace-level-gate-v1: PREFER the standoff branch with the smallest predicted
+                # EXECUTED (droop) tilt + most clearance (level_place_ik(gc) already returns an
+                # executed-level standoff, but ranks by nearest-seed, not executed tilt).
+                sol, self._preplace_standoff_exec_rpy = cl.solve_level_standoff(
+                    robot, standoff, self._carton_up_in_tool,
+                    list(self.collect_place_preplace_shape), gc, tool_link=tcp_link, limits=limits)
+            else:
+                sol = cl.level_place_ik(robot, standoff, self._carton_up_in_tool,
+                                        list(self.collect_place_preplace_shape), tool_link=tcp_link,
+                                        limits=limits, gravity_comp=gc)
         except ValueError as exc:
             print('PREPLACE_ABOVE_%s_UNSOLVED: %s (falling back to the fixed preplace shape)'
                   % ('SUPPORT' if above_support else 'PLACE', exc), flush=True)
@@ -2107,6 +2192,14 @@ class TransferController:
                               % (mode.upper(), clr,
                                  'preplace-above-support-v1' if mode == 'support'
                                  else 'descent-residual-v1'), flush=True)
+                    # sim-preplace-level-gate-v1: when the preplace gate is on AND the standoff was re-targeted
+                    # above the support (``above``), the standoff is ALREADY executed-level (solve_level_standoff
+                    # min-executed branch); drive the carried APPROACH to it as a DROOP-COMPENSATED, DENSIFIED,
+                    # speed/accel-capped leveled path (the coldwin50 fix: the geometric-interior approach drooped
+                    # ~1.8 deg executed and the coarse fast sweep deflected run-to-run). Off / no above-standoff
+                    # => the single leveled-endpoint approach below (byte-identical).
+                    if (getattr(self._carton_level, 'preplace_level_gate', False) and above is not None):
+                        return self._issue_gated_preplace_approach(preplace_shape, s.joint_positions)
                     preplace_goal = self._level_place_goal(preplace_shape, s.joint_positions)
                     # sim-carton-level-preplace-v1: drive the carry/tuck -> standoff APPROACH as a LEVELED
                     # WAYPOINT PATH, not a single begin_joint_goal. PR 290 leveled the standoff ENDPOINT and
