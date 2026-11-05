@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -492,6 +493,13 @@ class LevelConfig:
     # the soft-wrist effort limit used only to REPORT the margin (never relaxed, never used to stiffen).
     preplace_reaction_branch: bool = False
     preplace_soft_effort_nm: float = 56.0
+    # sim-preplace-branch-select-bounded-v1: CPU time-box (seconds) for the reaction-branch standoff
+    # search (``select_reaction_natural_standoff``). The search is pure CPU and now cheap (~0.08 s on the
+    # coldwin57 fixture), so this is a safety net: a search still running after the budget REFUSES the
+    # preplace before motion (BranchSelectBudgetExceeded -> named _fail) instead of blocking the host
+    # executor past the Isaac 5 sim-s HOST_STATUS_WATCHDOG (coldwin59). Default 2.0 s (>20x the measured
+    # cost, a fraction of the 5 s watchdog). Measured on time.perf_counter (a CPU/wall budget, NOT sim).
+    preplace_branch_select_budget_s: float = 2.0
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -548,6 +556,10 @@ class LevelConfig:
         if not (math.isfinite(self.preplace_soft_effort_nm) and self.preplace_soft_effort_nm > 0):
             raise ValueError('carton_level.preplace_soft_effort_nm must be a finite positive N*m (the '
                              'soft-wrist effort limit used to report the holding-torque margin)')
+        if not (math.isfinite(self.preplace_branch_select_budget_s)
+                and self.preplace_branch_select_budget_s > 0):
+            raise ValueError('carton_level.preplace_branch_select_budget_s must be a finite positive '
+                             'number of seconds (the CPU time-box for the reaction-branch standoff search)')
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         bad = [j for j in self.joints if j not in ARM_JOINTS]
         if bad or not self.joints:
@@ -606,7 +618,7 @@ def resolve_level_config(spec):
                  'closed_loop_authority_deg', 'closed_loop_rate_deg_per_s', 'closed_loop_gain',
                  'place_contact_gap_m', 'preplace_gate_bound_deg', 'preplace_max_segment_rad',
                  'preplace_approach_speed', 'preplace_approach_accel', 'preplace_max_wrist_step_rad',
-                 'preplace_soft_effort_nm'):
+                 'preplace_soft_effort_nm', 'preplace_branch_select_budget_s'):
         if fnum in spec and spec[fnum] is not None:
             kw[fnum] = float(spec[fnum])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
@@ -2203,6 +2215,14 @@ class CartonLevelServo:
 
 # ---------------- reaction-natural standoff branch selector (sim-preplace-wrist-continuity-v1)
 
+
+class BranchSelectBudgetExceeded(RuntimeError):
+    """The reaction-branch standoff search did not finish inside its CPU time-box
+    (sim-preplace-branch-select-bounded-v1). Raised by :func:`select_reaction_natural_standoff` so the
+    controller REFUSES the preplace before motion with a named reason, instead of blocking the host
+    executor past the Isaac HOST_STATUS_WATCHDOG (coldwin59)."""
+
+
 def wrist_hold_torque_peak(robot, waypoints, soft_joints, *, carton_mass=0.45, tool_link='ur_tool0',
                            root='ur_base_link'):
     """Peak static-gravity holding torque (N*m) on the soft wrist ``soft_joints`` over a leg's ``waypoints``
@@ -2261,7 +2281,7 @@ def select_reaction_natural_standoff(robot, target_pos, up_in_tool, seed_config,
                                      joints=None, level_joints=DEFAULT_LEVEL_JOINTS, soft_joints=None,
                                      tool_link='ur_tool0', root='ur_base_link', limits=None, base_R=None,
                                      carton_mass=0.45, max_segment_rad=0.25, bound_deg=DEFAULT_TILT_BOUND_DEG,
-                                     effort_limit=56.0):
+                                     effort_limit=56.0, full_plan=False, budget_s=None, clock=None):
     """Choose the pre-place standoff wrist BRANCH the soft wrist_2 drive naturally SETTLES on -- the
     reaction-natural branch (sim-preplace-wrist-continuity-v1, the primary coldwin57 fix).
 
@@ -2285,12 +2305,42 @@ def select_reaction_natural_standoff(robot, target_pos, up_in_tool, seed_config,
     settling DIRECTION (the drive drifts toward low wrist_2), hence the min-|wrist_2| rule; the torque is
     reported only so the lane sees the margin and the model's inapplicability.
 
+    sim-preplace-branch-select-bounded-v1 -- CHEAP + TIME-BOXED (coldwin59). The ``full_plan=False`` DEFAULT
+    validates each branch's leg-2 feasibility with the CHEAP endpoint level-solve (``level_config`` of the
+    leg-2 start at the carry pan; the standoff end is already reach+level from the enumerate) and reports the
+    holding torque over the 2-point ``[leg-2 start, standoff]`` sweep -- NOT the full densified
+    ``plan_level_world_approach`` the selector used to run per branch (8 branches x ~1.7 s each = ~14 s, which
+    blocked the host executor for >5 s at the preplace transition and tripped the Isaac HOST_STATUS_WATCHDOG).
+    The CHOSEN standoff is unchanged: the branch is decided by the min-|wrist_2| primary key, which the full
+    densified leg-2 plan never affected (it only filtered and ranked); the standoff returned is the enumerate
+    branch config verbatim either way, so the selection result is byte-identical to the old inline computation
+    on the coldwin57 fixture (asserted in ``test_preplace_branch_select_bounded_v1``) at ~0.08 s instead of
+    ~14 s. A mid-leg-2 infeasibility that the full plan alone would have caught is still owned by the
+    downstream world-level approach gate (``_issue_gated_preplace_approach`` re-plans + rejects before motion).
+    ``full_plan=True`` restores the old densified per-branch path (kept for the parity reference).
+
+    ``budget_s`` time-boxes the whole search on the CPU clock ``clock`` (default ``time.perf_counter`` -- the
+    search is pure CPU, never a sim event): a search still running after ``budget_s`` raises
+    :class:`BranchSelectBudgetExceeded` so the caller REFUSES before motion rather than starving the heartbeat.
+    ``None`` => no time-box (legacy).
+
     Returns ``(standoff_map, report)`` where ``report`` is a dict with ``branches`` (per-branch
     ``{wrist_2, peak_torque_nm, peak_joint, per_joint_nm, peak_tilt_deg, leg1_wrist_sweep_rad, chosen}``,
     sorted by |wrist_2|), ``chosen_wrist_2``, ``chosen_peak_torque_nm``, ``chosen_peak_joint``,
     ``chosen_margin_nm`` (effort_limit - peak), ``min_torque_wrist_2`` (the branch minimum-torque WOULD pick,
-    for the honest comparison), and ``effort_limit_nm``. Raises ValueError when no reach+level branch yields a
-    valid leg-2 sweep (the caller falls back to the single ``level_place_ik`` standoff). Pure/CPU."""
+    for the honest comparison), ``effort_limit_nm``, ``select_seconds`` (the measured CPU search time) and
+    ``full_plan``. Raises ValueError when no reach+level branch yields a valid leg-2 start (the caller falls
+    back to the single ``level_place_ik`` standoff). Pure/CPU."""
+    if clock is None:
+        clock = time.perf_counter
+    t0 = clock()
+
+    def _tick():
+        if budget_s is not None and (clock() - t0) > budget_s:
+            raise BranchSelectBudgetExceeded(
+                'reaction-branch standoff search exceeded the %.3f s budget (%.3f s elapsed, %s path)'
+                % (float(budget_s), clock() - t0, 'full' if full_plan else 'cheap'))
+
     soft = tuple(soft_joints) if soft_joints is not None else tuple(level_joints)
     carry = _as_joint_map(carry_config)
     carry_pan = float(carry['ur_shoulder_pan_joint'])
@@ -2302,25 +2352,33 @@ def select_reaction_natural_standoff(robot, target_pos, up_in_tool, seed_config,
                          % list(np.round(np.asarray(target_pos, float)[:3], 4)))
     scored = []
     for std in branches:
+        _tick()
         # leg-2 start = this standoff with pan at the carry pan, wrists re-leveled in world at the carry pan
-        # (the leg-1 end), then replay leg 2 (pan -> standoff pan) ON this branch via the continuous solve.
+        # (the leg-1 end). The CHEAP default validates feasibility at that endpoint; full_plan replays the
+        # whole densified leg 2 (pan -> standoff pan) ON this branch via the continuous solve.
         start = dict(std)
         start['ur_shoulder_pan_joint'] = carry_pan
         try:
             start = level_config(robot, start, up_in_tool, joints=level_joints, tool_link=tool_link,
                                  root=root, limits=limits, accept_deg=bound_deg, base_R=base_R)
-            plan = plan_level_world_approach(robot, start, std, up_in_tool, level_joints=level_joints,
-                                             tool_link=tool_link, root=root, limits=limits,
-                                             bound_deg=bound_deg, max_segment_rad=max_segment_rad,
-                                             base_R=base_R)
+            if full_plan:
+                plan = plan_level_world_approach(robot, start, std, up_in_tool, level_joints=level_joints,
+                                                 tool_link=tool_link, root=root, limits=limits,
+                                                 bound_deg=bound_deg, max_segment_rad=max_segment_rad,
+                                                 base_R=base_R)
+                tau_waypoints = plan.waypoints
+                peak_tilt = plan.max_tilt
+            else:
+                tau_waypoints = [_as_vec(start), _as_vec(std)]
+                peak_tilt = None
         except ValueError:
             continue
-        peak, pj, per = wrist_hold_torque_peak(robot, plan.waypoints, soft, carton_mass=carton_mass,
+        peak, pj, per = wrist_hold_torque_peak(robot, tau_waypoints, soft, carton_mass=carton_mass,
                                                tool_link=tool_link, root=root)
         w2 = float(std.get('ur_wrist_2_joint', 0.0))
         scored.append({'std': std, 'wrist_2': w2, 'abs_w2': abs(_wrap(w2)),
                        'peak_torque_nm': peak, 'peak_joint': pj, 'per_joint_nm': per,
-                       'peak_tilt_deg': plan.max_tilt,
+                       'peak_tilt_deg': peak_tilt,
                        'leg1_wrist_sweep_rad': abs(_wrap(w2 - carry_w2))})
     if not scored:
         raise ValueError('no reach+level standoff branch produced a valid leg-2 sweep')
@@ -2331,7 +2389,8 @@ def select_reaction_natural_standoff(robot, target_pos, up_in_tool, seed_config,
     report = {'branches': [], 'chosen_wrist_2': chosen['wrist_2'],
               'chosen_peak_torque_nm': chosen['peak_torque_nm'], 'chosen_peak_joint': chosen['peak_joint'],
               'chosen_margin_nm': float(effort_limit) - chosen['peak_torque_nm'],
-              'min_torque_wrist_2': min_torque['wrist_2'], 'effort_limit_nm': float(effort_limit)}
+              'min_torque_wrist_2': min_torque['wrist_2'], 'effort_limit_nm': float(effort_limit),
+              'select_seconds': clock() - t0, 'full_plan': bool(full_plan)}
     for s in scored:
         report['branches'].append({'wrist_2': s['wrist_2'], 'peak_torque_nm': s['peak_torque_nm'],
                                    'peak_joint': s['peak_joint'],

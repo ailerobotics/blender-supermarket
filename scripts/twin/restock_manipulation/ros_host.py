@@ -9,6 +9,7 @@ from dataclasses import asdict
 import json
 import os
 import sys
+import time
 
 from .ros_adapter import (RosMotionPort, RosTransferBridge, require_sim_domain,
                           sensors_from_json,planner_velocity_scale)
@@ -322,6 +323,27 @@ def main():
     # liveness heartbeat on the status topic each wait slice so the Isaac status watchdog sees the live
     # host and defers to the wait's own named sim-budget (collectretreat1 false trip).
     payload.heartbeat = bridge.heartbeat
+    # sim-preplace-branch-select-bounded-v1: a SEPARATE daemon thread keeps /manipulation/status fresh
+    # while the single rclpy executor is busy in a long controller.step()/planning call -- so no planner
+    # that blocks the executor can ever starve the Isaac status watchdog again (coldwin58/59: the inline
+    # reaction-branch solve ran >5 s at the preplace transition and tripped HOST_STATUS_WATCHDOG). The
+    # filler publishes the SAME liveness message RosTransferBridge already emits (status='running',
+    # heartbeat=True, no controls -> never clears active, never advances the sensor anchors), topping up
+    # only genuine gaps older than the interval while a job is active. HOST key status_heartbeat_interval_s
+    # (seconds); 0 disables => byte-identical (no filler thread). The reaction-branch solve is also now
+    # cheap + time-boxed off the hot path; this is the belt-and-suspenders structural guarantee.
+    _hb_interval = float(config.get('status_heartbeat_interval_s', 0.5))
+    status_heartbeat = None
+    if _hb_interval > 0:
+        from .status_heartbeat import StatusHeartbeat
+        status_heartbeat = StatusHeartbeat(
+            publish=bridge._publish_liveness, now=time.monotonic,
+            is_active=lambda: getattr(controller, 'phase', 'idle') not in ('idle', 'failed', 'succeeded'),
+            interval=_hb_interval)
+        bridge.status_heartbeat = status_heartbeat
+        status_heartbeat.start()
+        print('STATUS_HEARTBEAT filler thread started (interval=%.2f s; keeps /manipulation/status fresh '
+              'while the executor is busy -- coldwin59)' % _hb_interval, flush=True)
     # Remember the synchronized native-contact packet before controller consumes it.
     original = bridge._sensors
     node.destroy_subscription(bridge.subscriptions[1])
@@ -411,6 +433,8 @@ def main():
         # surface to a later op as a bare 'host emergency stop'. Name the publication so host-stack.log
         # always carries the trigger (PR 231 named only the in-op controller/port fault paths).
         print('HOST_EXIT_ESTOP_PUBLISH reason=%r' % 'motion host process exiting', flush=True)
+        if status_heartbeat is not None:
+            status_heartbeat.stop()
         motion.stop()
         payload.close()
         node.destroy_node()

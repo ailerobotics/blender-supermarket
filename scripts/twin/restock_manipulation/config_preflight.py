@@ -582,10 +582,12 @@ def check_preplace_phase_budget(host_cfg):
             # step is measured at runtime by the level gate (CARTON_LEVEL_PREPLACE_GATE max_wrist_step=...),
             # which needs the FK model; the preflight reports the configured threshold + the selector state.
             print('CONFIG_PREFLIGHT: PREPLACE_WRIST_CONTINUITY max_wrist_step<=%.3f rad; reaction_branch=%s '
-                  '(min-|wrist_2| settling-branch standoff; soft-wrist effort %.0f N*m for the reported margin)'
+                  '(min-|wrist_2| settling-branch standoff; soft-wrist effort %.0f N*m for the reported '
+                  'margin; branch-select CPU budget=%.1f s off the host hot path -- coldwin59)'
                   % (lc.preplace_max_wrist_step_rad,
                      'ON' if getattr(lc, 'preplace_reaction_branch', False) else 'off',
-                     lc.preplace_soft_effort_nm))
+                     lc.preplace_soft_effort_nm,
+                     getattr(lc, 'preplace_branch_select_budget_s', 2.0)))
             if eff < plan_s:
                 problems.append('phase_timeout_s=%.1f is BELOW the planned wrist-first preplace duration '
                                 '%.1f s (leg1=%.1f + leg2=%.1f) -- the preplace would time out before leg 2 '

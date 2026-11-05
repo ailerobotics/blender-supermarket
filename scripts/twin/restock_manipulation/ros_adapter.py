@@ -9,6 +9,7 @@ from dataclasses import asdict
 import json
 import math
 import os
+import threading
 import time
 import xml.etree.ElementTree as ET
 
@@ -2467,6 +2468,12 @@ class RosTransferBridge:
         self.last_packet_sim = None   # node-clock (sim) time of the last frame; gates the per-frame bound
         self.last_sim = None
         self.sequence = 0
+        # sim-preplace-branch-select-bounded-v1: the status heartbeat can now be published from BOTH the
+        # executor thread (_emit / heartbeat) and a separate StatusHeartbeat filler thread, so guard the
+        # sequence allocation + publish so two threads never collide on a sequence number (a duplicate
+        # sequence is silently dropped by the Isaac poll). Set by ros_host when the filler is wired.
+        self._pub_lock = threading.Lock()
+        self.status_heartbeat = None
         self.status = node.create_publisher(String, '/restock_sim/manipulation/status', 10)
         self.gripper = node.create_publisher(Bool, '/restock_sim/gripper/enable', 10)
         # Contact-terminated move seam: the controller raises a 'contact' control from measured
@@ -2502,16 +2509,21 @@ class RosTransferBridge:
                                       clock=Clock(clock_type=ClockType.STEADY_TIME))
 
     def _emit(self, result):
-        self.sequence += 1
         data = asdict(result)
-        data['sequence'] = self.sequence
         data['job_id'] = getattr(self.controller, 'job', {}).get('job_id')
-        self.status.publish(self.String(data=json.dumps(data, allow_nan=False)))
+        with self._pub_lock:
+            self.sequence += 1
+            data['sequence'] = self.sequence
+            self.status.publish(self.String(data=json.dumps(data, allow_nan=False)))
         for command in result.controls:
             if command['kind'] == 'gripper':
                 self.gripper.publish(self.Bool(data=command['enabled']))
             elif command['kind'] == 'contact':
                 self.arm_contact.publish(self.Bool(data=True))
+        # sim-preplace-branch-select-bounded-v1: a real executor-driven publish just happened, so the
+        # filler thread only needs to top up genuine gaps after this.
+        if self.status_heartbeat is not None:
+            self.status_heartbeat.note_publish()
 
     def heartbeat(self):
         """sim-host-status-watchdog-v1: publish a liveness-only /manipulation/status (fresh sequence, no
@@ -2533,14 +2545,8 @@ class RosTransferBridge:
         for an UNINSTRUMENTED executor hang that emits no heartbeat at all -- the Isaac status watchdog's
         5 sim-s backstop (now a named HOST_STATUS_WATCHDOG line). Guarded on an active job so the startup
         obstacle waits (phase 'idle') publish nothing => byte-identical to a run with no blocking wait."""
-        phase = getattr(self.controller, 'phase', 'host')
-        if phase in ('idle', 'failed', 'succeeded'):
+        if not self._publish_liveness():
             return
-        self.sequence += 1
-        data = {'status': 'running', 'phase': phase, 'reason': 'host-alive heartbeat',
-                'controls': [], 'evidence': [], 'sequence': self.sequence,
-                'job_id': getattr(self.controller, 'job', {}).get('job_id'), 'heartbeat': True}
-        self.status.publish(self.String(data=json.dumps(data, allow_nan=False)))
         # SIBLING of the same class (the one-table audit): the host's OWN sensor-stream _watchdog runs on
         # this SAME single-threaded executor, so a blocking payload _wait reached via the _watchdog->drain
         # path leaves last_packet_sim/last_packet_wall stale, and when _watchdog resumes it would false-trip
@@ -2553,6 +2559,28 @@ class RosTransferBridge:
         self.last_packet_wall = time.monotonic()
         if self.last_packet_sim is not None:
             self.last_packet_sim = self.node.get_clock().now().nanoseconds * 1e-9
+
+    def _publish_liveness(self):
+        """sim-preplace-branch-select-bounded-v1: publish ONE liveness-only /manipulation/status (fresh
+        sequence, ``status='running'``, ``heartbeat=True``, no controls), the shared body of
+        :meth:`heartbeat` and the separate ``StatusHeartbeat`` filler thread. Unlike :meth:`heartbeat` it
+        does NOT advance the sensor-stream anchors, so the free-running filler keeps the status heartbeat
+        fresh without ever masking the sensor-stream watchdog (which measures the real /sensors cadence).
+        Returns False (published nothing) when the job is idle/terminal so an idle host is byte-identical.
+        Sequence allocation + publish are lock-guarded (two threads may call this)."""
+        phase = getattr(self.controller, 'phase', 'host')
+        if phase in ('idle', 'failed', 'succeeded'):
+            return False
+        job_id = getattr(self.controller, 'job', {}).get('job_id')
+        with self._pub_lock:
+            self.sequence += 1
+            data = {'status': 'running', 'phase': phase, 'reason': 'host-alive heartbeat',
+                    'controls': [], 'evidence': [], 'sequence': self.sequence,
+                    'job_id': job_id, 'heartbeat': True}
+            self.status.publish(self.String(data=json.dumps(data, allow_nan=False)))
+        if self.status_heartbeat is not None:
+            self.status_heartbeat.note_publish()
+        return True
 
     def _job(self, message):
         try:
