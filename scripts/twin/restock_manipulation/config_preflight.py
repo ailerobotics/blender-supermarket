@@ -90,6 +90,11 @@ KEY_CONSUMER = {
     # tuning dict (gate dwell/fractions, backstop params, replannable_phases). Absent/False => byte-identical.
     'reactive_arm_human': HOST,
     'reactive_arm': HOST,
+    # sim-arm-reactive-replan-v1 (PR-B): execution-time corridor-watch re-plan (ros_host ->
+    # TransferController). reactive_arm_replan (bool) toggles it; the optional tuning lives under
+    # reactive_arm['replan'] (margin_m, max_replans, min_replan_interval_s, samples, max_snapshot_age_s).
+    # Requires the sibling perception_collision_gate on for the ESDF source. Absent/False => byte-identical.
+    'reactive_arm_replan': HOST,
     'carton_level': HOST,  # sim-carton-level-carry-v1: level the carried carton (fold goals) + CARTON_TILT trip; HOST (the controller drives the arm)
     # sim-preplace-per-joint-gains-v1: preplace frozen-joint convergence guard + wrist-first sequencing
     # fallback (ros_host -> TransferController). Both opt-in, default off => byte-identical.

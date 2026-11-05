@@ -7,10 +7,10 @@ is **never the stop** — the human gate owns it (scout `sim-perception-architec
 
 Shipped in two parts:
 
-* **PR-A — human-aware RUN/SLOW/STOP/BACKSTOP authority** (this section). Live.
+* **PR-A — human-aware RUN/SLOW/STOP/BACKSTOP authority** (next section). Live.
 * **PR-B — execution-time corridor-watch preempt + cuMotion re-plan** against the
   perceived-clearance seams merged by `sim-rgbd-arm-collision-aware-v1`
-  (`esdf_source` / `collision_gate` / `gated_motion`). (follow-up)
+  (`esdf_source` / `collision_gate` / `gated_motion`). Live (last section).
 
 ## PR-A: human-aware slow/stop
 
@@ -78,3 +78,51 @@ person, resumes on a clear dwell, byte-identical when off), and `set_paused`.
 env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
   scripts/twin/tests/test_reactive_arm_human.py -q
 ```
+
+## PR-B: execution-time corridor-watch re-plan
+
+The sibling `sim-rgbd-arm-collision-aware-v1` gate gates a leg at **dispatch** (before
+`begin`). PR-B is the execution-time complement its `README_perception.md` names: while a
+free-space re-plannable leg **executes**, re-query the live nvblox ESDF along the
+gripper(+carton) swept corridor of the **remaining** leg; when a NEW obstacle enters it
+below a margin, PREEMPT the running goal (the same e-stop-free `motion.cancel()` path),
+re-plan the remaining leg with cuMotion against the current ESDF, and resume. Bounded
+re-plan count with a self-recovering HOLD when it cannot route clear; rate-limited.
+People re-route the plan (generic dynamic volumes); the human gate (PR-A) owns the STOP.
+
+| File | Role |
+|---|---|
+| `reactive_replan.py` | `ReactiveReplanController` — the pure decide core (ported from `~/ur10/dynamic_pick`): continue / preempt / bounded / self-recovering HOLD, rate-limited. |
+| `reactive_arm.py` | `ReactiveArmSupervisor._corridor_watch` — reuses the merged `collision_gate.PerceptionCollisionGate.evaluate_corridor` + `esdf_source` (so an execution intrusion uses the SAME margin logic as the dispatch gate); only a FINITE observed clearance below the margin counts (an unobserved/stale corridor is the dispatch gate's concern). `build_corridor_fn(gated_port)` builds the remaining-corridor FK from the sibling `GatedMotionPort`. |
+
+Enable (HOST config; requires the sibling `perception_collision_gate` on for the ESDF source):
+
+```json
+{ "perception_collision_gate": { "margin_m": 0.05 },
+  "reactive_arm_replan": true,
+  "reactive_arm": { "replan": { "margin_m": 0.05, "max_replans": 3,
+                                "min_replan_interval_s": 0.5 } } }
+```
+
+Absent / `false` ⇒ the corridor watch is inert ⇒ byte-identical. The mission wires the ESDF
+source + corridor builder at boot (`ros_host` → `reactive_arm.build_corridor_fn(motion)` →
+`controller.set_arm_clearance_source(...)`). With `perception_collision_gate` off the watch
+has no live ESDF source and stays inert (logged).
+
+### CPU proof
+
+`scripts/twin/tests/test_reactive_arm_replan.py` (no ROS/Isaac/GPU): the decide core
+(continue/preempt/bounded/HOLD/reset); the supervisor corridor watch against a **mock nvblox
+ESDF** (`AnalyticBoxEsdfSource` with a moving obstacle) + the **real**
+`PerceptionCollisionGate` — a planted obstacle entering the remaining corridor preempts +
+re-plans, the arm continues once it clears, a persistent obstacle exhausts the bounded budget
+into a self-recovering HOLD; the real `TransferController.step` seam; and a moving-obstacle
+timeline replay showing the preempt → re-plan → continue timeline.
+
+```
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+  scripts/twin/tests/test_reactive_arm_replan.py -q
+```
+
+Bounded GPU S4 (person + moving obstacle, preempt + re-plan + human SLOW→STOP→resume) is the
+integration-lane-owned run in `docs/examples/arm-reactive-replan-fragment.json` (PENDING).

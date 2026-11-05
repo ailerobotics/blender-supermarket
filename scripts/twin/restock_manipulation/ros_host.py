@@ -333,10 +333,32 @@ def main():
         reactive_arm_human=bool(config.get('reactive_arm_human', False)),
         reactive_arm_config=(config.get('reactive_arm') if isinstance(config.get('reactive_arm'), dict)
                              else None),
+        # sim-arm-reactive-replan-v1 (PR-B): opt-in execution-time corridor-watch re-plan. While a
+        # free-space leg EXECUTES, re-query the live ESDF along the REMAINING swept corridor; a NEW
+        # obstacle below margin preempts (e-stop-free cancel) + re-plans the remaining leg (bounded;
+        # HOLD when it cannot route clear). Consumes the sibling perceived-clearance seam (requires
+        # perception_collision_gate on for the ESDF source). Absent/False => inert => byte-identical.
+        reactive_arm_replan=bool(config.get('reactive_arm_replan', False)),
+        reactive_arm_replan_config=((config.get('reactive_arm') or {}).get('replan')
+                                    if isinstance(config.get('reactive_arm'), dict) else None),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # Late-bind the live controller into the perceived-clearance gate's phase/held/carton reads.
     _gate_ctrl['c'] = controller
+    # sim-arm-reactive-replan-v1 (PR-B): wire the execution-time corridor watch to the sibling's
+    # perceived-clearance ESDF source (the wrapped GatedMotionPort). Inert unless BOTH
+    # reactive_arm_replan and perception_collision_gate are on (the watch needs the live ESDF).
+    if bool(config.get('reactive_arm_replan', False)):
+        from . import reactive_arm as _ra
+        _esdf_src, _corridor_fn = _ra.build_corridor_fn(motion)
+        if _esdf_src is not None:
+            controller.set_arm_clearance_source(esdf_source=_esdf_src, corridor_fn=_corridor_fn)
+            print('REACTIVE_REPLAN wired to the perceived-clearance ESDF source (execution-time '
+                  'corridor watch active on the free-space legs)', flush=True)
+        else:
+            print('REACTIVE_REPLAN enabled but perception_collision_gate is OFF: the corridor watch '
+                  'has no live ESDF source and stays inert -- enable perception_collision_gate',
+                  flush=True)
     # collect-gt: the ground-truth collect switch is the shared RESTOCK_COLLECT_GROUND_TRUTH env (inherited from
     # the run env); log the host's view at boot so an Isaac/host activation split is visible immediately.
     print('COLLECT_GROUND_TRUTH host enabled=%s' % controller.collect_ground_truth, flush=True)

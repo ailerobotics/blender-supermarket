@@ -123,7 +123,8 @@ class TransferController:
                  carton_level=None, fk_urdf=None, place_tcp_link='gripper_pad_tcp',
                  station_pitch_hold: bool = False, station_hold_roll_deg: float = 0.0,
                  station_hold_pitch_deg: float = 0.0,
-                 reactive_arm_human: bool = False, reactive_arm_config=None):
+                 reactive_arm_human: bool = False, reactive_arm_config=None,
+                 reactive_arm_replan: bool = False, reactive_arm_replan_config=None):
         self.steady_clock=steady_clock
         # sim-carton-level-place-on-cart-v1: the FK link the collect place-on-cart reach targets -- the
         # motion port's IK tcp ('gripper_pad_tcp'), NOT ur_tool0 (~0.27 m apart). The level place IK must
@@ -324,7 +325,7 @@ class TransferController:
         self._arm_pause_sink = None              # injected: ArmCommandGate.set_paused (reversible)
         self._arm_detection_provider = None      # injected: now_wall -> vendored SafetyState | None
         self._reactive_arm = None
-        if reactive_arm_human:
+        if reactive_arm_human or reactive_arm_replan:
             cfg = dict(reactive_arm_config or {})
             gate_cfg = ArmGateConfig(**{k: cfg[k] for k in ArmGateConfig.__dataclass_fields__
                                         if k in cfg}).validate()
@@ -332,10 +333,30 @@ class TransferController:
             bs_params = ArmBackstopParams(**{k: bs_cfg[k] for k in ArmBackstopParams.__dataclass_fields__
                                              if k in bs_cfg}).validate()
             phases = cfg.get('replannable_phases')
+            # PR-B: execution-time corridor-watch re-plan. Build the pure ReactiveReplanController +
+            # a PerceptionCollisionGate (reusing the sibling perceived-clearance logic) from config;
+            # the ESDF source + corridor builder are injected Isaac-side at boot (set_arm_clearance_source),
+            # so replan stays inert until they are wired.
+            replan_ctrl = collision_gate = None
+            if reactive_arm_replan:
+                from . import reactive_replan as _rr
+                from .collision_gate import PerceptionCollisionGate as _PCG
+                rcfg = dict(reactive_arm_replan_config or {})
+                replan_ctrl = _rr.ReactiveReplanController(
+                    min_replan_interval_s=float(rcfg.get('min_replan_interval_s', 0.5)),
+                    max_replans=int(rcfg.get('max_replans', 3)))
+                collision_gate = _PCG(margin_m=float(rcfg.get('margin_m', 0.05)),
+                                      mode='refuse', unknown_action='hold',
+                                      phases=(frozenset(phases) if phases
+                                              else reactive_arm.DEFAULT_REPLANNABLE_PHASES),
+                                      samples=int(rcfg.get('samples', 6)),
+                                      max_snapshot_age_s=float(rcfg.get('max_snapshot_age_s', 0.5)))
             self._reactive_arm = reactive_arm.ReactiveArmSupervisor(
                 gate_config=gate_cfg, backstop_params=bs_params,
                 replannable_phases=(frozenset(phases) if phases else None),
-                enable_backstop=bool(cfg.get('enable_backstop', True)))
+                enable_backstop=bool(cfg.get('enable_backstop', True)),
+                enable_human=bool(reactive_arm_human),
+                collision_gate=collision_gate, replan_controller=replan_ctrl)
         # sim-carton-level-carry-v1: keep the welded carton PARALLEL TO THE GROUND through every carried
         # move (captain's rule; coldwin16 swung it ~150 deg off its weld attitude during the fold). A
         # resolved carton_level.LevelConfig (or None => off => byte-identical) plus the FK URDF path lets
@@ -824,6 +845,18 @@ class TransferController:
         self._arm_detection_provider = provider
         if self._reactive_arm is not None:
             self._reactive_arm.set_detection_provider(provider)
+
+    def set_arm_clearance_source(self, *, esdf_source, corridor_fn):
+        """sim-arm-reactive-replan-v1 (PR-B): inject the perceived-clearance seams for the execution-
+        time corridor-watch re-plan (sibling sim-rgbd-arm-collision-aware-v1).
+
+        ``esdf_source`` is an ``esdf_source.EsdfSource`` (``snapshot(now)`` -> live nvblox ESDF cropped
+        to ur_base_link); ``corridor_fn(measured_joints, goal_pose, held) -> [AABB]`` builds the
+        REMAINING swept gripper(+carton) corridor (current-TCP FK -> goal). The mission builds both from
+        the GatedMotionPort at boot (``reactive_arm.build_corridor_fn``). Inert (replan stays off) unless
+        ``reactive_arm_replan`` is enabled => byte-identical."""
+        if self._reactive_arm is not None:
+            self._reactive_arm.set_clearance_source(esdf_source=esdf_source, corridor_fn=corridor_fn)
 
     def start(self, operation: str, job: dict) -> None:
         if self.phase not in ('idle', 'succeeded', 'failed') or self.held:
@@ -2216,12 +2249,24 @@ class TransferController:
         # (freshness-sim-clock-not-wall): the safety frame's evidence age is bounded in sim seconds, which
         # render pacing only makes more generous in wall time.
         if self._reactive_arm is not None:
+            # PR-B corridor watch reads the remaining swept corridor from the measured joints to the
+            # current phase's goal TCP pose (self.poses[phase]); None goal => the human layer still runs,
+            # the corridor watch is inert this tick.
+            _goal_pose = self.poses.get(self.phase) if getattr(self, 'poses', None) else None
             d = self._reactive_arm.supervise(
                 now=now, now_wall=now, phase=self.phase, motion=self.motion,
-                leg_running=self.issued)
+                leg_running=self.issued, measured=sensors.joint_positions,
+                goal_pose=_goal_pose, held=self.held)
             self._reactive_arm_slow = bool(d.slow)
             if d.reissue:
                 self.issued = False
+                # record the preempt+re-plan (human SLOW or PR-B corridor REPLAN) once per transition
+                if d.action != getattr(self, '_react_last_action', None):
+                    self._react_last_action = d.action
+                    self.evidence.append({'reactive_arm': {'action': d.action, 'reason': d.reason,
+                                                           'sim_time': float(now), 'reissue': True}})
+                    print('REACTIVE_ARM_PREEMPT phase=%s action=%s now=%.3f %s'
+                          % (self.phase, d.action, now, d.reason), flush=True)
             if d.fail is not None:
                 return self._fail('reactive arm: ' + d.fail)
             if d.block:
