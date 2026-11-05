@@ -208,6 +208,113 @@ def tool_position(robot, config, tool_link='ur_tool0', root='ur_base_link'):
 PLACE_CONTACT_RELEASE = 'PLACE_CONTACT_RELEASE'
 
 
+# --------------------------------------------- cached tool-chain FK (sim-preplace-select-live-cost-v1)
+# The reaction-branch standoff selector ran ~25-28 s on the real coldwin60 inputs (coldwin60-select-cost),
+# NOT the ~0.08 s the coldwin57 fixture measured -- the fixture's standoff target IS its seed's own TCP, so
+# level_place_ik's first seed reaches it in zero iterations, while the real target (the place load-centre,
+# ~0.5 m off the seed TCP) forces the full damped-least-squares descent. Profiling: 8 branches x a ~31-seed
+# multi-start, up-to-200-iteration DLS, each iteration a residual FK + a 6-column finite-difference Jacobian
+# (7 FK/iter) = ~61 000 FK calls, each ~0.39 ms through ``link_world_transforms`` -- which rebuilds the
+# WHOLE 36-link mobile robot tree (base + cart + arm) though only ``tool_link`` is needed.
+#
+# This cached chain evaluates ONLY the root->tool_link kinematic chain, with each joint's constant origin
+# transform precomputed once, so a single-joint FINITE-DIFFERENCE perturbation (the Jacobian columns)
+# recomputes only that joint and two cached prefix/suffix products. The arithmetic is the SAME
+# finite-difference Jacobian the slow path computes (same ``step_fd``, same residual, same matmul order up
+# to floating-point associativity), so a ``fast=True`` solve lands within ~1e-4 rad of the slow solve
+# (asserted in test_preplace_branch_select_bounded_v1) -- not a different method, just the same math without
+# the whole-tree FK. Scoped to the opt-in ``fast=`` selector path; every other caller is byte-identical.
+_CHAIN_CACHE = {}
+
+
+def _axis_rot4(axis, q):
+    """4x4 homogeneous rotation of ``q`` rad about the unit ``axis`` (Rodrigues). Matches
+    ``urdf_probe.joint_transform``'s axis block to < 1e-12."""
+    c = math.cos(q); s = math.sin(q); C = 1.0 - c
+    x, y, z = float(axis[0]), float(axis[1]), float(axis[2])
+    return np.array([[c + x * x * C, x * y * C - z * s, x * z * C + y * s, 0.0],
+                     [y * x * C + z * s, c + y * y * C, y * z * C - x * s, 0.0],
+                     [z * x * C - y * s, z * y * C + x * s, c + z * z * C, 0.0],
+                     [0.0, 0.0, 0.0, 1.0]])
+
+
+class _KinChain:
+    """The ordered root->tool_link joint chain with constant per-joint origin transforms precomputed, for
+    the selector's many FK evaluations. ``tool(cfg)`` returns the same 4x4 as ``tool_transform`` (same
+    matmul order); ``perturbed_tool`` gives a single-joint finite-difference neighbour cheaply via the
+    cached prefix/suffix products. Revolute/continuous joints only (the UR arm chain); a prismatic or an
+    unreachable tool raises so the caller falls back to the slow whole-tree FK."""
+
+    def __init__(self, robot, tool_link, root):
+        from twin.urdf_probe import rpy_to_matrix
+        by_child = {j.child: j for j in robot.joints}
+        chain = []
+        cur = tool_link
+        while cur != root and cur in by_child:
+            j = by_child[cur]
+            chain.append(j)
+            cur = j.parent
+        if not chain or cur != root:
+            raise KeyError('tool link %r not reachable from %r via the joint tree' % (tool_link, root))
+        chain.reverse()
+        self.joints = chain
+        self.names = [j.name for j in chain]
+        self.index = {j.name: k for k, j in enumerate(chain)}
+        self.origin = []
+        self.axis = []
+        self.movable = []
+        for j in chain:
+            if j.jtype == 'prismatic':
+                raise KeyError('prismatic joint %r in the tool chain is not supported by the fast FK'
+                               % j.name)
+            T = np.eye(4)
+            T[:3, :3] = rpy_to_matrix(j.origin_rpy)
+            T[:3, 3] = j.origin_xyz
+            self.origin.append(T)
+            a = np.asarray(j.axis, float)
+            n = float(np.linalg.norm(a))
+            self.axis.append(a / n if n else a)
+            self.movable.append(j.jtype in ('revolute', 'continuous'))
+        self.n = len(chain)
+
+    def _mat(self, k, q):
+        if not self.movable[k]:
+            return self.origin[k]
+        return self.origin[k] @ _axis_rot4(self.axis[k], q)
+
+    def evaluate(self, cfg):
+        """Return ``(T_tool, prefix, suffix)`` at ``cfg`` (a joint map). ``prefix[k]`` is the product of
+        joint matrices 0..k-1, ``suffix[k]`` of k..n-1, so ``prefix[k] @ _mat(k, q') @ suffix[k+1]`` is the
+        tool transform with only joint ``k`` changed to ``q'``."""
+        mats = [self._mat(k, float(cfg.get(self.names[k], 0.0))) for k in range(self.n)]
+        prefix = [np.eye(4)] * (self.n + 1)
+        for k in range(self.n):
+            prefix[k + 1] = prefix[k] @ mats[k]
+        suffix = [np.eye(4)] * (self.n + 1)
+        for k in range(self.n - 1, -1, -1):
+            suffix[k] = mats[k] @ suffix[k + 1]
+        return prefix[self.n], prefix, suffix
+
+    def perturbed_tool(self, prefix, suffix, jname, q_new):
+        k = self.index[jname]
+        return prefix[k] @ self._mat(k, q_new) @ suffix[k + 1]
+
+
+def _chain_for(robot, tool_link, root):
+    """A cached :class:`_KinChain` for ``(robot, tool_link, root)`` or ``None`` when the chain cannot be
+    built by the fast FK (caller then uses the slow whole-tree FK, byte-identical)."""
+    key = (id(robot), tool_link, root)
+    hit = _CHAIN_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        chain = _KinChain(robot, tool_link, root)
+    except KeyError:
+        chain = None
+    _CHAIN_CACHE[key] = chain
+    return chain
+
+
 def place_descent_drop_m(robot, waypoints, *, tool_link='ur_tool0', root='ur_base_link'):
     """The vertical TCP drop (m, world +Z) of a planned place descent -- the height the welded carton
     centre falls from the leveled standoff (``waypoints[0]``) to the set-down (``waypoints[-1]``). Both
@@ -651,7 +758,7 @@ _W2_SEED_GRID = (0.0, math.pi / 2, math.pi)
 
 def level_config(robot, goal_config, up_in_tool, *, joints=DEFAULT_LEVEL_JOINTS,
                  tool_link='ur_tool0', root='ur_base_link', limits=None,
-                 max_iter=80, tol_deg=0.05, accept_deg=None, base_R=None):
+                 max_iter=80, tol_deg=0.05, accept_deg=None, base_R=None, fast=False):
     """Re-solve ``joints`` of ``goal_config`` so the carried carton's up-axis points world-up (a
     level-orientation waypoint). Returns a new joint map. Position (pan/lift/elbow) is untouched;
     only the wrist cluster moves, so the tool stays where the carry plan put it and the carton is
@@ -679,6 +786,9 @@ def level_config(robot, goal_config, up_in_tool, *, joints=DEFAULT_LEVEL_JOINTS,
         raise ValueError('no adjustable joints present in the goal config')
     u = _unit(up_in_tool)
     accept = float(tol_deg if accept_deg is None else accept_deg)
+    # sim-preplace-select-live-cost-v1: the cached tool-chain FK (same finite-difference arithmetic, only
+    # the root->tool_link chain instead of the whole-robot tree) when fast; None => the slow whole-tree FK.
+    chain = _chain_for(robot, tool_link, root) if fast else None
 
     def up_world(cfgmap):
         return _apply_base(base_R, tool_rotation(robot, cfgmap, tool_link, root) @ u)
@@ -695,18 +805,33 @@ def level_config(robot, goal_config, up_in_tool, *, joints=DEFAULT_LEVEL_JOINTS,
                     cfgmap[j] = min(max(cfgmap[j], lo), hi)
         return cfgmap
 
+    def _tilt_uw(uw):
+        return math.degrees(math.acos(max(-1.0, min(1.0, float(uw[2])))))
+
     def descend(start):
         m = clamp(dict(start))
         step_fd = 1e-4
         for _ in range(int(max_iter)):
-            if tilt_deg(m) <= tol_deg:
-                break
-            r0 = up_world(m) - WORLD_UP   # 3-D residual: zero only upright, repulsive at the 180 pole
-            J = np.zeros((3, len(adj)))
-            for k, j in enumerate(adj):
-                m2 = dict(m)
-                m2[j] = m[j] + step_fd
-                J[:, k] = (up_world(m2) - WORLD_UP - r0) / step_fd
+            if chain is not None:
+                T, prefix, suffix = chain.evaluate(m)
+                uw = _apply_base(base_R, T[:3, :3] @ u)
+                if _tilt_uw(uw) <= tol_deg:
+                    break
+                r0 = uw - WORLD_UP
+                J = np.zeros((3, len(adj)))
+                for k, j in enumerate(adj):
+                    Tp = chain.perturbed_tool(prefix, suffix, j, m[j] + step_fd)
+                    uwp = _apply_base(base_R, Tp[:3, :3] @ u)
+                    J[:, k] = (uwp - WORLD_UP - r0) / step_fd
+            else:
+                if tilt_deg(m) <= tol_deg:
+                    break
+                r0 = up_world(m) - WORLD_UP  # 3-D residual: zero only upright, repulsive at the 180 pole
+                J = np.zeros((3, len(adj)))
+                for k, j in enumerate(adj):
+                    m2 = dict(m)
+                    m2[j] = m[j] + step_fd
+                    J[:, k] = (up_world(m2) - WORLD_UP - r0) / step_fd
             lam = 1e-6
             dq = -np.linalg.solve(J.T @ J + lam * np.eye(len(adj)), J.T @ r0)
             mx = float(np.max(np.abs(dq))) if dq.size else 0.0
@@ -715,6 +840,9 @@ def level_config(robot, goal_config, up_in_tool, *, joints=DEFAULT_LEVEL_JOINTS,
             for k, j in enumerate(adj):
                 m[j] = m[j] + float(dq[k])
             clamp(m)
+        if chain is not None:
+            T, _, _ = chain.evaluate(m)
+            return m, _tilt_uw(_apply_base(base_R, T[:3, :3] @ u))
         return m, tilt_deg(m)
 
     # Seed combos: the goal itself first (offset 0 -> the fast, nearest-to-plan path for an
@@ -862,18 +990,37 @@ class LevelPathPlan:
                 f'{self.waypoints_n}-waypoint leveled path exceeds bound {float(bound_deg):.2f} deg '
                 f'-- refusing to execute a visibly tilted carry')
 
-    def reject_wrist_step(self, max_step_rad):
+    def reject_wrist_step(self, max_step_rad, level_joints=DEFAULT_LEVEL_JOINTS):
         """The CARTON_LEVEL_PLAN_REJECTED message when the planned approach has a per-waypoint wrist step
         above ``max_step_rad`` (sim-preplace-wrist-continuity-v1), else ``None``. A branch jump the soft
         wrist cannot track (coldwin57's class) is refused before motion rather than streamed into a
         tracking fault. Cheap safety: the branch-continuous re-solve already avoids a jump, so this only
-        ever fires if a genuinely discontinuous level branch is the sole option at a waypoint."""
+        ever fires if a genuinely discontinuous level branch is the sole option at a waypoint.
+
+        sim-preplace-select-live-cost-v1: the message now also NAMES the jump -- the before/after waypoint
+        joint vectors, which wrist stepped, and the standoff (final waypoint) -- so the exact branch jump is
+        captured in the log even though the plan is refused before any CARTON_TICK streams (the coldwin61
+        evidence ask: the joints were otherwise unrecoverable after the fact)."""
         if self.max_wrist_step <= float(max_step_rad):
             return None
+        detail = ''
+        wp = int(self.worst_step_wp)
+        if 1 <= wp < len(self.waypoints):
+            from twin.restock_manipulation.cad_tool import ARM_JOINTS
+            before = self.waypoints[wp - 1]
+            after = self.waypoints[wp]
+            idx = {j: k for k, j in enumerate(ARM_JOINTS)}
+            jmax = max((j for j in level_joints if j in idx),
+                       key=lambda j: abs(after[idx[j]] - before[idx[j]]), default=None)
+            jn = jmax if jmax is not None else '?'
+            detail = (' joint=%s wp%d=%s wp%d=%s standoff=%s'
+                      % (jn, wp - 1, [round(float(v), 4) for v in before],
+                         wp, [round(float(v), 4) for v in after],
+                         [round(float(v), 4) for v in self.waypoints[-1]]))
         return (f'{CARTON_LEVEL_PLAN_REJECTED} carried approach has a {self.max_wrist_step:.3f} rad wrist '
                 f'step at waypoint {self.worst_step_wp}/{self.waypoints_n} (continuity threshold '
                 f'{float(max_step_rad):.3f} rad) -- a branch jump the soft wrist cannot track; refusing '
-                f'before motion rather than streaming it into a TRAJ_HOST tracking fault')
+                f'before motion rather than streaming it into a TRAJ_HOST tracking fault' + detail)
 
 
 def plan_level_path(robot, start_config, goal_config, up_in_tool, *, bound_deg=DEFAULT_TILT_BOUND_DEG,
@@ -1205,11 +1352,14 @@ def level_branches(robot, config, up_in_tool, *, joints=DEFAULT_LEVEL_JOINTS, to
 
 
 def _level_descend(robot, u, adj, start, *, tool_link='ur_tool0', root='ur_base_link', limits=None,
-                   base_R=None, max_iter=80, tol_deg=0.05):
+                   base_R=None, max_iter=80, tol_deg=0.05, fast=False):
     """One multi-start Gauss-Newton descent of a single seed to a level-orientation config, shared by
     :func:`level_branches` and :func:`continuous_level_solve`. ``u`` is the unit carton up-axis in the tool
     frame, ``adj`` the adjustable (wrist) joints. Returns ``(cfgmap, tilt_deg)``. The math is IDENTICAL to the
-    descent inside :func:`level_config` (3-D orientation residual, step-bounded, clamped to ``limits``)."""
+    descent inside :func:`level_config` (3-D orientation residual, step-bounded, clamped to ``limits``).
+    ``fast`` routes the FK through the cached tool-chain (sim-preplace-select-live-cost-v1)."""
+    chain = _chain_for(robot, tool_link, root) if fast else None
+
     def up_world(cfgmap):
         return _apply_base(base_R, tool_rotation(robot, cfgmap, tool_link, root) @ u)
 
@@ -1228,14 +1378,25 @@ def _level_descend(robot, u, adj, start, *, tool_link='ur_tool0', root='ur_base_
     m = clamp(dict(start))
     step_fd = 1e-4
     for _ in range(int(max_iter)):
-        if tilt_deg(m) <= tol_deg:
-            break
-        r0 = up_world(m) - WORLD_UP
-        J = np.zeros((3, len(adj)))
-        for k, j in enumerate(adj):
-            m2 = dict(m)
-            m2[j] = m[j] + step_fd
-            J[:, k] = (up_world(m2) - WORLD_UP - r0) / step_fd
+        if chain is not None:
+            T, prefix, suffix = chain.evaluate(m)
+            uw = _apply_base(base_R, T[:3, :3] @ u)
+            if math.degrees(math.acos(max(-1.0, min(1.0, float(uw[2]))))) <= tol_deg:
+                break
+            r0 = uw - WORLD_UP
+            J = np.zeros((3, len(adj)))
+            for k, j in enumerate(adj):
+                Tp = chain.perturbed_tool(prefix, suffix, j, m[j] + step_fd)
+                J[:, k] = (_apply_base(base_R, Tp[:3, :3] @ u) - WORLD_UP - r0) / step_fd
+        else:
+            if tilt_deg(m) <= tol_deg:
+                break
+            r0 = up_world(m) - WORLD_UP
+            J = np.zeros((3, len(adj)))
+            for k, j in enumerate(adj):
+                m2 = dict(m)
+                m2[j] = m[j] + step_fd
+                J[:, k] = (up_world(m2) - WORLD_UP - r0) / step_fd
         dq = -np.linalg.solve(J.T @ J + 1e-6 * np.eye(len(adj)), J.T @ r0)
         mx = float(np.max(np.abs(dq))) if dq.size else 0.0
         if mx > 0.3:
@@ -1248,7 +1409,8 @@ def _level_descend(robot, u, adj, start, *, tool_link='ur_tool0', root='ur_base_
 
 def continuous_level_solve(robot, base_config, up_in_tool, prev_wrists, *, joints=DEFAULT_LEVEL_JOINTS,
                            tool_link='ur_tool0', root='ur_base_link', limits=None,
-                           accept_deg=DEFAULT_TILT_BOUND_DEG, base_R=None, tol_deg=0.05, max_iter=80):
+                           accept_deg=DEFAULT_TILT_BOUND_DEG, base_R=None, tol_deg=0.05, max_iter=80,
+                           fast=False):
     """BRANCH-CONTINUOUS level-orientation solve (sim-preplace-wrist-continuity-v1).
 
     Enumerate the level wrist branches for ``base_config`` (multi-start, like :func:`level_config`) and return
@@ -1285,7 +1447,7 @@ def continuous_level_solve(robot, base_config, up_in_tool, prev_wrists, *, joint
         start = dict(cfg)
         start.update(seed)
         sol, t = _level_descend(robot, u, adj, start, tool_link=tool_link, root=root, limits=limits,
-                                base_R=base_R, max_iter=max_iter, tol_deg=tol_deg)
+                                base_R=base_R, max_iter=max_iter, tol_deg=tol_deg, fast=fast)
         if t <= accept:
             step = max((abs(sol[j] - prev[j]) for j in adj if j in prev), default=0.0)
             if best is None or step < best[0]:
@@ -1300,7 +1462,7 @@ def plan_level_world_approach(robot, start_config, leveled_goal, up_in_tool, *, 
                               tool_link='ur_tool0', root='ur_base_link', limits=None,
                               bound_deg=DEFAULT_TILT_BOUND_DEG, max_segment_rad=0.25, interior=8,
                               level_joints=DEFAULT_LEVEL_JOINTS, base_R=None,
-                              max_wrist_step_rad=DEFAULT_MAX_WRIST_STEP_RAD):
+                              max_wrist_step_rad=DEFAULT_MAX_WRIST_STEP_RAD, anchor='start', fast=False):
     """Plan the carried pre-place APPROACH from ``start_config`` to an ALREADY-LEVELED standoff
     ``leveled_goal`` as a GEOMETRIC, DENSIFIED, WORLD-level waypoint path (sim-preplace-leg2-level-v1).
 
@@ -1323,40 +1485,87 @@ def plan_level_world_approach(robot, start_config, leveled_goal, up_in_tool, *, 
     The first waypoint is pinned to ``start_config`` verbatim (``begin_joint_path`` requires it) and the last
     to ``leveled_goal`` (the already-world-level standoff); the final pin's step from the last interior
     waypoint is included in ``max_wrist_step``. Returns a ``LevelPathPlan`` whose ``max_*`` are the predicted
-    WORLD-frame extremes. Pure/CPU."""
+    WORLD-frame extremes. Pure/CPU.
+
+    sim-preplace-select-live-cost-v1 -- ``anchor`` addresses the coldwin61 branch jump. The legacy FORWARD
+    pass (``anchor='start'``, the DEFAULT -- byte-identical to the prior behaviour) seeds each interior
+    waypoint from the previous one STARTING at ``start_config``, so the min-travel chain walks the START-side
+    branch and, when the selected standoff sits on a different wrist branch than the one the interior drifted
+    onto, the FINAL pin to ``leveled_goal`` jumps (coldwin61: 0.439 rad at waypoint 10/10 ->
+    CARTON_LEVEL_PLAN_REJECTED before motion). ``anchor='goal'`` solves the interior BACKWARD from
+    ``leveled_goal`` -- seeding each waypoint from its GOAL-side neighbour -- so the interior holds the SELECTED
+    standoff's branch and the TERMINAL pin's step is ~0; any residual branch mismatch then surfaces at the
+    START pin (where the live arm actually is) instead of at the standoff the soft wrist must hold through
+    leg 2. ``anchor='auto'`` (what the controller uses) plans BOTH and chooses GATE-AWARE: it keeps the
+    legacy forward plan whenever that already passes both gates (wrist step <= ``max_wrist_step_rad`` AND
+    predicted tilt <= ``bound_deg``) -- so an already-acceptable plan is NEVER replaced -- and switches to the
+    goal-anchored plan only when it is acceptable and forward is not; if neither passes it returns the
+    smaller-wrist-step plan (the caller reports it either way). ``fast`` routes the per-waypoint solves
+    through the cached tool-chain FK.
+
+    NOTE (sim-preplace-select-live-cost-v1 CPU finding): when ``start_config`` and ``leveled_goal`` are on
+    genuinely DIFFERENT wrist branches (a discrete gap no densification bridges), neither anchor removes the
+    jump -- it only MOVES which waypoint crosses it. The real remedy there is to choose a standoff branch
+    reachable from the carry pose (the reaction-natural standoff is meant to be exactly that); the reject
+    message now names the before/after joints so the next run captures which joint and how far."""
     start = _as_joint_map(start_config)
     svec = _as_vec(start)
     goal_map = _as_joint_map(leveled_goal)
     gvec = _as_vec(goal_map)
     adj = [j for j in level_joints if j in start]
     n = densify_count(svec, gvec, max_segment_rad)
-    vecs = [list(svec)]
-    prev = dict(start)
-    max_step = 0.0
-    worst_wp = 0
-    for i in range(1, n + 1):
+
+    def _interp_base(i):
         a = i / float(n)
-        base = {j: (1 - a) * svec[k] + a * gvec[k] for k, j in enumerate(_ARM_ORDER())}
-        if i == n:
-            # pin the world-level standoff verbatim; it defines the terminal branch. Still measure the step
-            # from the previous (continuous) waypoint so a jump into the pinned goal is reported/refused too.
-            sol = dict(goal_map)
-            step = max((abs(sol[j] - prev[j]) for j in adj), default=0.0)
-        else:
+        return {j: (1 - a) * svec[k] + a * gvec[k] for k, j in enumerate(_ARM_ORDER())}
+
+    def _solve(direction):
+        sols = [None] * (n + 1)
+        sols[0] = dict(start)        # start pinned (begin_joint_path requires it)
+        sols[n] = dict(goal_map)     # the selected world-level standoff, pinned verbatim
+        rng = range(n - 1, 0, -1) if direction == 'goal' else range(1, n)
+        prev = dict(goal_map) if direction == 'goal' else dict(start)
+        for i in rng:
+            base = _interp_base(i)
             for j in adj:
-                base[j] = prev[j]   # seed the wrists from the previous leveled waypoint (continuity)
-            sol, _tilt, step = continuous_level_solve(
+                base[j] = prev[j]
+            sol, _tilt, _step = continuous_level_solve(
                 robot, base, up_in_tool, prev, joints=level_joints, tool_link=tool_link, root=root,
-                limits=limits, accept_deg=bound_deg, base_R=base_R)
-        if step > max_step:
-            max_step = step
-            worst_wp = i
-        vecs.append(_as_vec(sol))
-        prev = sol
-    mr, mp, mt = predict_path_tilt_executed(robot, vecs, up_in_tool, tool_link=tool_link, root=root,
-                                            interior=interior, gravity_comp=None, base_R=base_R)
-    return LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs), max_roll=mr, max_pitch=mp,
-                         max_tilt=mt, waypoints_n=n, max_wrist_step=max_step, worst_step_wp=worst_wp)
+                limits=limits, accept_deg=bound_deg, base_R=base_R, fast=fast)
+            sols[i] = sol
+            prev = sol
+        ms, wp = 0.0, 0
+        for i in range(1, n + 1):
+            step = max((abs(sols[i][j] - sols[i - 1][j]) for j in adj), default=0.0)
+            if step > ms:
+                ms, wp = step, i
+        return sols, ms, wp
+
+    def _build(direction):
+        sols, ms, wp = _solve(direction)
+        vecs = [_as_vec(sols[i]) for i in range(n + 1)]
+        mr, mp, mt = predict_path_tilt_executed(robot, vecs, up_in_tool, tool_link=tool_link, root=root,
+                                                interior=interior, gravity_comp=None, base_R=base_R)
+        return LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs), max_roll=mr, max_pitch=mp,
+                             max_tilt=mt, waypoints_n=n, max_wrist_step=ms, worst_step_wp=wp)
+
+    if anchor != 'auto':
+        return _build(anchor)
+    # 'auto': plan both and choose GATE-AWARE so a forward plan that already passes BOTH gates is never
+    # replaced (no regression); switch to the goal-anchored plan only when it is acceptable and forward is
+    # not; else keep whichever has the smaller wrist step (both fail -- the caller reports it either way).
+    fwd = _build('start')
+    gol = _build('goal')
+
+    def _ok(p):
+        return (p.max_wrist_step <= float(max_wrist_step_rad)
+                and max(p.max_roll, p.max_pitch) <= float(bound_deg))
+
+    if _ok(fwd):
+        return fwd
+    if _ok(gol):
+        return gol
+    return gol if gol.max_wrist_step < fwd.max_wrist_step else fwd
 
 
 def _ARM_ORDER():
@@ -1663,7 +1872,8 @@ _W3_SEED_GRID = tuple(np.linspace(-math.pi, math.pi, 9))
 
 def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
                    tool_link='ur_tool0', root='ur_base_link', limits=None, max_iter=200,
-                   pos_tol=1e-3, tilt_tol_deg=0.05, w_ori=1.0, gravity_comp=None, base_R=None):
+                   pos_tol=1e-3, tilt_tol_deg=0.05, w_ori=1.0, gravity_comp=None, base_R=None,
+                   fast=False):
     """Re-plan a carried place pose that is BOTH at ``target_pos`` (tool origin in ``root``) AND level
     (carton up-axis world +Z) -- the fix PR 287 flagged as a follow-up: wrist-ONLY leveling of a
     reach-authored place shape holds the attitude but shifts the TCP ~0.2-0.5 m and loses the deck
@@ -1691,9 +1901,12 @@ def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
         geom = level_place_ik(robot, target_pos, up_in_tool, seed_config, joints=joints,
                               tool_link=tool_link, root=root, limits=limits, max_iter=max_iter,
                               pos_tol=pos_tol, tilt_tol_deg=tilt_tol_deg, w_ori=w_ori, gravity_comp=None,
-                              base_R=base_R)
+                              base_R=base_R, fast=fast)
         return gravity_comp.wrist_feedforward(robot, geom, up_in_tool, tool_link=tool_link, root=root,
                                               limits=limits, accept_deg=DEFAULT_TILT_BOUND_DEG, base_R=base_R)
+    # sim-preplace-select-live-cost-v1: the cached tool-chain FK (same finite-difference arithmetic on just
+    # the root->tool_link chain) when fast and no droop model is requested; None => the slow whole-tree FK.
+    chain = _chain_for(robot, tool_link, root) if fast else None
     cfg = _as_joint_map(seed_config)
     adj = list(joints) if joints is not None else list(ARM_JOINTS)
     adj = [j for j in adj if j in cfg]
@@ -1727,18 +1940,35 @@ def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
                     cfgmap[j] = min(max(cfgmap[j], lo), hi)
         return cfgmap
 
+    def _resid_from_T(T):
+        p = T[:3, 3]
+        uw = _apply_base(base_R, T[:3, :3] @ u)
+        return np.concatenate([(p - tgt), w_ori * (uw - WORLD_UP)])
+
     def descend(start):
         m = clamp(dict(start))
         step_fd = 1e-5
         for _ in range(int(max_iter)):
-            r0 = residual(m)
-            if np.linalg.norm(r0[:3]) <= pos_tol and tilt_from(m) <= tilt_tol_deg:
-                break
-            J = np.zeros((6, len(adj)))
-            for k, j in enumerate(adj):
-                m2 = dict(m)
-                m2[j] = m[j] + step_fd
-                J[:, k] = (residual(m2) - r0) / step_fd
+            if chain is not None:
+                T, prefix, suffix = chain.evaluate(m)
+                r0 = _resid_from_T(T)
+                tilt = math.degrees(math.acos(max(-1.0, min(1.0,
+                       float(_apply_base(base_R, T[:3, :3] @ u)[2])))))
+                if np.linalg.norm(r0[:3]) <= pos_tol and tilt <= tilt_tol_deg:
+                    break
+                J = np.zeros((6, len(adj)))
+                for k, j in enumerate(adj):
+                    Tp = chain.perturbed_tool(prefix, suffix, j, m[j] + step_fd)
+                    J[:, k] = (_resid_from_T(Tp) - r0) / step_fd
+            else:
+                r0 = residual(m)
+                if np.linalg.norm(r0[:3]) <= pos_tol and tilt_from(m) <= tilt_tol_deg:
+                    break
+                J = np.zeros((6, len(adj)))
+                for k, j in enumerate(adj):
+                    m2 = dict(m)
+                    m2[j] = m[j] + step_fd
+                    J[:, k] = (residual(m2) - r0) / step_fd
             dq = -np.linalg.solve(J.T @ J + 1e-6 * np.eye(len(adj)), J.T @ r0)
             mx = float(np.max(np.abs(dq))) if dq.size else 0.0
             if mx > 0.3:
@@ -2241,13 +2471,15 @@ def wrist_hold_torque_peak(robot, waypoints, soft_joints, *, carton_mass=0.45, t
 
 
 def enumerate_level_place_branches(robot, target_pos, up_in_tool, seed_config, *, joints=None,
-                                   tool_link='ur_tool0', root='ur_base_link', limits=None, base_R=None):
+                                   tool_link='ur_tool0', root='ur_base_link', limits=None, base_R=None,
+                                   fast=False):
     """Enumerate the DISTINCT reach+level standoff branches at ``target_pos`` (sim-preplace-wrist-continuity-v1).
 
     Runs :func:`level_place_ik` (geometric, world frame, no droop) from several wrist_2 seeds spanning the
     allowed range, so BOTH the high-wrist_2 (~1.63) and low-wrist_2 (~0.4) equivalent-orientation branches
     are found, deduped by the rounded wrist_2 (the branch discriminant for a top-grasped level carton).
-    Returns a list of ARM-order joint maps (each reaches ``target_pos`` AND is level). Pure/CPU."""
+    Returns a list of ARM-order joint maps (each reaches ``target_pos`` AND is level). ``fast`` routes each
+    :func:`level_place_ik` through the cached tool-chain FK (sim-preplace-select-live-cost-v1). Pure/CPU."""
     cfg = _as_joint_map(seed_config)
     w2 = 'ur_wrist_2_joint'
     seeds = [dict(cfg)]
@@ -2266,7 +2498,7 @@ def enumerate_level_place_branches(robot, target_pos, up_in_tool, seed_config, *
     for s in seeds:
         try:
             sol = level_place_ik(robot, target_pos, up_in_tool, s, joints=joints, tool_link=tool_link,
-                                 root=root, limits=limits, gravity_comp=None, base_R=base_R)
+                                 root=root, limits=limits, gravity_comp=None, base_R=base_R, fast=fast)
         except ValueError:
             continue
         key = round(_wrap(float(sol.get(w2, 0.0))), 2)
@@ -2281,7 +2513,7 @@ def select_reaction_natural_standoff(robot, target_pos, up_in_tool, seed_config,
                                      joints=None, level_joints=DEFAULT_LEVEL_JOINTS, soft_joints=None,
                                      tool_link='ur_tool0', root='ur_base_link', limits=None, base_R=None,
                                      carton_mass=0.45, max_segment_rad=0.25, bound_deg=DEFAULT_TILT_BOUND_DEG,
-                                     effort_limit=56.0, full_plan=False, budget_s=None, clock=None):
+                                     effort_limit=56.0, full_plan=False, budget_s=None, clock=None, fast=True):
     """Choose the pre-place standoff wrist BRANCH the soft wrist_2 drive naturally SETTLES on -- the
     reaction-natural branch (sim-preplace-wrist-continuity-v1, the primary coldwin57 fix).
 
@@ -2324,6 +2556,15 @@ def select_reaction_natural_standoff(robot, target_pos, up_in_tool, seed_config,
     :class:`BranchSelectBudgetExceeded` so the caller REFUSES before motion rather than starving the heartbeat.
     ``None`` => no time-box (legacy).
 
+    sim-preplace-select-live-cost-v1 -- ``fast`` (default True) routes every ``level_place_ik`` /
+    ``level_config`` solve through the cached tool-chain FK (the SAME finite-difference arithmetic, only the
+    root->tool_link chain instead of the whole 36-link mobile-robot tree that ``link_world_transforms``
+    rebuilt each call). coldwin60's select took ~25-28 s on the real place target (NOT the ~0.08 s the
+    coldwin57 fixture measured, whose standoff target IS its seed's own TCP so the descent runs zero
+    iterations); the cached chain brings it to ~1.5 s with the chosen standoff within ~1e-4 rad of the slow
+    FK -- comfortably inside a small ``budget_s``. ``fast=False`` restores the whole-tree FK (the reference
+    the identity test compares against).
+
     Returns ``(standoff_map, report)`` where ``report`` is a dict with ``branches`` (per-branch
     ``{wrist_2, peak_torque_nm, peak_joint, per_joint_nm, peak_tilt_deg, leg1_wrist_sweep_rad, chosen}``,
     sorted by |wrist_2|), ``chosen_wrist_2``, ``chosen_peak_torque_nm``, ``chosen_peak_joint``,
@@ -2346,7 +2587,8 @@ def select_reaction_natural_standoff(robot, target_pos, up_in_tool, seed_config,
     carry_pan = float(carry['ur_shoulder_pan_joint'])
     carry_w2 = float(carry.get('ur_wrist_2_joint', 0.0))
     branches = enumerate_level_place_branches(robot, target_pos, up_in_tool, seed_config, joints=joints,
-                                              tool_link=tool_link, root=root, limits=limits, base_R=base_R)
+                                              tool_link=tool_link, root=root, limits=limits, base_R=base_R,
+                                              fast=fast)
     if not branches:
         raise ValueError('no reach+level standoff branch at target %s'
                          % list(np.round(np.asarray(target_pos, float)[:3], 4)))
@@ -2360,7 +2602,7 @@ def select_reaction_natural_standoff(robot, target_pos, up_in_tool, seed_config,
         start['ur_shoulder_pan_joint'] = carry_pan
         try:
             start = level_config(robot, start, up_in_tool, joints=level_joints, tool_link=tool_link,
-                                 root=root, limits=limits, accept_deg=bound_deg, base_R=base_R)
+                                 root=root, limits=limits, accept_deg=bound_deg, base_R=base_R, fast=fast)
             if full_plan:
                 plan = plan_level_world_approach(robot, start, std, up_in_tool, level_joints=level_joints,
                                                  tool_link=tool_link, root=root, limits=limits,

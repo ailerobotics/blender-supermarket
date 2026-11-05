@@ -341,6 +341,10 @@ class TransferController:
         # (keyed by phase, for the CARTON_SEGMENT_TILT report), and the reaction-natural branch report.
         self._carton_seg_wrist_step = {}
         self._preplace_branch_report = None
+        # sim-preplace-select-live-cost-v1: per-operation memo of the reaction-branch standoff select
+        # (key -> (sol, report)). The select is a pure function of its (static) inputs, so a preplace
+        # StageRetry / re-begin reuses the first result instead of re-running the ~1.5 s CPU search.
+        self._preplace_branch_cache = None
         # sim-preplace-branch-select-bounded-v1: set to a reason string by _preplace_above_place_goal when
         # the reaction-branch standoff search exceeds its CPU time-box, so the preplace step REFUSES before
         # motion (instead of starving the host /manipulation/status heartbeat past the Isaac watchdog).
@@ -827,6 +831,7 @@ class TransferController:
         self._collect_source_evidence_waits = 0  # fm449: ticks awaiting a clean source capture before the reach
         self._recovery_credit_s = 0.0           # sim-robust-phase-timeout-during-recovery-v1: fresh per op
         self._recovery_pause_logged = False
+        self._preplace_branch_cache = None  # sim-preplace-select-live-cost-v1: fresh per op
         self._esdf_boot_gate.reset()   # sim-robust-esdf-boot-gate-v1: re-arm the boot ESDF-ack gate per op
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
         self.verify_ids = set()
@@ -1270,7 +1275,8 @@ class TransferController:
                     robot, list(measured), list(leveled_goal), up_level,
                     tool_link=tcp_link, limits=limits, bound_deg=cl_cfg.bound_deg,
                     max_segment_rad=cl_cfg.preplace_max_segment_rad, level_joints=cl_cfg.joints,
-                    base_R=base_R, max_wrist_step_rad=cl_cfg.preplace_max_wrist_step_rad)
+                    base_R=base_R, max_wrist_step_rad=cl_cfg.preplace_max_wrist_step_rad,
+                    anchor='auto', fast=True)
             else:
                 plan = cl.plan_compensated_approach(
                     robot, list(measured), list(leveled_goal), self._carton_up_in_tool, gc,
@@ -1311,7 +1317,7 @@ class TransferController:
         # sim-preplace-wrist-continuity-v1: refuse a planned per-waypoint wrist BRANCH JUMP (the soft wrist
         # cannot track one -- coldwin57's class) before motion rather than stream it into a TRAJ_HOST
         # tracking fault. The branch-continuous re-solve already avoids a jump, so this is cheap safety.
-        step_reject = plan.reject_wrist_step(cl_cfg.preplace_max_wrist_step_rad)
+        step_reject = plan.reject_wrist_step(cl_cfg.preplace_max_wrist_step_rad, level_joints=cl_cfg.joints)
         if step_reject is not None:
             print(step_reject, flush=True)
             return self._fail(step_reject)
@@ -1388,6 +1394,27 @@ class TransferController:
             return goal
         return tuple(float(leveled[j]) for j in ARM_JOINTS)
 
+    def _preplace_branch_select_key(self, standoff, measured, tcp_link, limits):
+        """An exact-match signature of every input the reaction-branch standoff select depends on, so the
+        per-operation memo (``_preplace_branch_cache``) is reused only when the inputs are identical --
+        a mismatch simply recomputes (never a stale standoff). sim-preplace-select-live-cost-v1."""
+        import numpy as _np
+
+        def _r(x):
+            return tuple(round(float(v), 9) for v in _np.asarray(x, float).ravel())
+
+        cl_cfg = self._carton_level
+        lim = tuple(sorted((j, round(float(lo), 9), round(float(hi), 9))
+                           for j, (lo, hi) in (limits or {}).items()))
+        return (
+            _r(standoff), _r(measured), tcp_link, lim,
+            _r(self._carton_up_in_tool_world) if self._carton_up_in_tool_world is not None else None,
+            _r(self._carton_base_R) if self._carton_base_R is not None else None,
+            _r(list(self.collect_place_preplace_shape)),
+            tuple(cl_cfg.joints), round(float(cl_cfg.preplace_max_segment_rad), 9),
+            round(float(cl_cfg.bound_deg), 9), round(float(cl_cfg.preplace_soft_effort_nm), 9),
+        )
+
     def _preplace_above_place_goal(self, measured):
         """The collect preplace standoff re-targeted DIRECTLY ABOVE the place load-centre, so the
         from-above vertical descent onto the support is POSITIVE and the welded gripper pad clears the
@@ -1452,20 +1479,32 @@ class TransferController:
                     # |wrist_2| == the branch the soft wrist_2 drive settles toward), so leg 1 drives to it
                     # and leg 2 holds it with no executed divergence (coldwin57's wrist_2 1.63->0.33 fault).
                     try:
-                        # sim-preplace-branch-select-bounded-v1: the search is CHEAP (off the host hot
-                        # path: ~0.08 s vs the ~14 s inline cost that tripped coldwin59's watchdog) and
-                        # TIME-BOXED on the CPU clock -- a budget overrun raises BranchSelectBudgetExceeded
-                        # so the preplace REFUSES before motion (caught at the caller) rather than blocking
-                        # the /manipulation/status heartbeat. The chosen branch is byte-identical.
-                        sol, self._preplace_branch_report = cl.select_reaction_natural_standoff(
-                            robot, standoff, self._carton_up_in_tool_world,
-                            list(self.collect_place_preplace_shape), list(measured), tool_link=tcp_link,
-                            limits=limits, base_R=self._carton_base_R, level_joints=self._carton_level.joints,
-                            max_segment_rad=self._carton_level.preplace_max_segment_rad,
-                            bound_deg=self._carton_level.bound_deg,
-                            effort_limit=self._carton_level.preplace_soft_effort_nm,
-                            budget_s=self._carton_level.preplace_branch_select_budget_s)
-                        sol = {j: float(sol[j]) for j in ARM_JOINTS}
+                        # sim-preplace-branch-select-bounded-v1 / sim-preplace-select-live-cost-v1: the
+                        # search runs the CHEAP (default) path through the cached tool-chain FK (~1.5 s on
+                        # the real coldwin60 inputs, down from ~25 s) and is TIME-BOXED on the CPU clock --
+                        # a budget overrun raises BranchSelectBudgetExceeded so the preplace REFUSES before
+                        # motion (caught at the caller) rather than blocking the /manipulation/status
+                        # heartbeat. The chosen branch is identical (within 1e-4 rad of the slow FK). The
+                        # result is memoised per operation so a StageRetry / re-begin is instant.
+                        _ck = self._preplace_branch_select_key(standoff, measured, tcp_link, limits)
+                        _cached = self._preplace_branch_cache
+                        if _cached is not None and _cached[0] == _ck:
+                            sol, self._preplace_branch_report = _cached[1], _cached[2]
+                            print('PREPLACE_REACTION_BRANCH cached (re-begin): chosen wrist_2=%.4f'
+                                  % self._preplace_branch_report.get('chosen_wrist_2', float('nan')),
+                                  flush=True)
+                        else:
+                            sol, self._preplace_branch_report = cl.select_reaction_natural_standoff(
+                                robot, standoff, self._carton_up_in_tool_world,
+                                list(self.collect_place_preplace_shape), list(measured), tool_link=tcp_link,
+                                limits=limits, base_R=self._carton_base_R,
+                                level_joints=self._carton_level.joints,
+                                max_segment_rad=self._carton_level.preplace_max_segment_rad,
+                                bound_deg=self._carton_level.bound_deg,
+                                effort_limit=self._carton_level.preplace_soft_effort_nm,
+                                budget_s=self._carton_level.preplace_branch_select_budget_s)
+                            sol = {j: float(sol[j]) for j in ARM_JOINTS}
+                            self._preplace_branch_cache = (_ck, sol, self._preplace_branch_report)
                     except cl.BranchSelectBudgetExceeded as _bud:
                         # REFUSE before motion (do NOT silently degrade to level_place_ik): a search that
                         # cannot finish in its budget would, if run inline, starve the heartbeat.
