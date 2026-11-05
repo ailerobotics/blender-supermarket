@@ -434,6 +434,34 @@ trigger. The 2.0° bound is untouched. Recommended ON values + acceptance:
 `docs/examples/place-release-on-contact-fragment.json`; CPU proof (each trigger, the obstruction gate, the
 coldwin68/coldwin64 replays): `scripts/twin/tests/test_place_release_on_contact_v1.py`.
 
+## Place-on-cart between-posts target (sim-place-target-between-posts-v1)
+
+The collect place-on-cart load-centre on the rollwagen **upper shelf** is moved from the old
+`(0.135, 0.0)` to the symmetric cage centre **`(0.0, 0.0)`** (cart body frame). The honest carton+pad
+sweep clears the mouth posts by **0.258 m** there (post_2/post_3) versus **0.185 m** at the old spot, the
+carton sits visually centred in the cage with equal front/back wall margin, and the standoff is
+reach-proven level (≤ the 2.0° bound) from the real park pose. Recommended values (nested
+`manipulation.cart_placement` + the matching `initial_staging.cart_load_center_body_xy`):
+`docs/examples/place-target-between-posts-fragment.json`. The CPU geometry + reach check and its verdict:
+`scripts/twin/restock_manipulation/place_target_between_posts.py`
+(`python3 -m twin.restock_manipulation.place_target_between_posts`), CI-pinned in
+`scripts/twin/tests/test_place_target_between_posts.py`.
+
+**The new spot is necessary, not sufficient — and the old spot was NOT statically marginal.** Measured
+from the three runs (nav-trace + host-stack): all three **parked the base at the same world pose**
+`(-4.61, 14.77)` through t≈195. coldwin64 kept it there and the carton landed at the cart-frame nominal
+`(0.131, 0.015)`, clearing every post. coldwin68 / coldwin69 **shoved the base ~0.33 m west during the
+loaded place phase** (cw68 −4.61→−4.93 at t≈227; cw69 →−4.96 at t≈233 — both still `parked=True`), so the
+arm, executing in `ur_base_link`, set the welded carton down ~0.5 m off-nominal in cart-y (~`(0.33, −0.52)`)
+straight onto `post_2`. The place **target** is already resolved cart-relative from the live cart prim
+(`isaac_factory._gt_place_target` → `ground_truth_collect.slot_pose`); it is the base *moving between
+target-resolve and set-down* that breaks the cart-relative landing. A ~0.5 m cart-y excursion cannot be
+absorbed by any spot on the 0.64 m-wide shelf with a 0.45 m carton (required margin 0.04 + 0.516 m
+measured spread ≫ the ~0.38 m max shelf post clearance), so `evaluate` FAILs `absorbs_drift` for **every**
+spot and names the shove. The blocking fix — hold the base through the loaded set-down (full six-axis
+station lock from the carried pre-place) or re-resolve the place target at descent time — is the collect
+place-descent control, lane **sim-station-lock-from-preplace-v1**. Adopt this nominal together with it.
+
 ## Reuse inventory and external work
 
 Read-only sources inspected:
