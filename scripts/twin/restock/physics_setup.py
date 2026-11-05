@@ -7,6 +7,7 @@ step; after construction callers receive drive targets and measured state only.
 from dataclasses import dataclass, fields
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,18 @@ from .scene import build, label_stock
 # in; absent => the global assemble() drive stays throughout (byte-identical). The switch is applied
 # ENTERING pan (the first loaded base rotation) through place, and back to soft after release.
 _PHASE_DRIVE_STIFF_PHASES = ('pan', 'preplace', 'place')
+
+# sim-preplace-per-joint-gains-v1: the six arm joints (full URDF names) and the WRIST cluster. The
+# carried-preplace swing (coldwin50/51/52) is injected by the TILT-sensitive joints the stiff drive
+# rings during the wrist_2 sweep -- the wrists (and shoulder_lift / elbow) have a large d(carton
+# pitch/roll)/d(joint); shoulder_pan is a near-vertical YAW joint with a small tilt sensitivity, so it
+# is swing-SAFE to stiffen. The per-joint override (``carried_joint_profile``) lets shoulder_pan hold
+# its goal against the wrist-sweep reaction (coldwin53 drifted it 0.56 rad under the soft eff 400 ceiling)
+# while the wrists stay SOFT (keeping the swing fix). The preflight refuses a wrist override that would
+# re-stiffen a wrist and reintroduce the swing.
+_ARM_JOINT_NAMES = ('ur_shoulder_pan_joint', 'ur_shoulder_lift_joint', 'ur_elbow_joint',
+                    'ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_joint')
+_WRIST_JOINT_NAMES = ('ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_joint')
 
 
 def resolve_stiff_phases(phase_drive_cfg):
@@ -85,6 +98,93 @@ def set_arm_drive_gains(robot, arm_joints, kp, kd, eff):
         kds[int(i)] = float(kd)
     arm_ctrl.set_gains(kps, kds)
     arm_ctrl.set_max_efforts(np.full(len(idx), float(eff)), joint_indices=idx)
+
+
+def _validate_gain_block(g, where):
+    """Coerce a {kp,kd,eff} block to floats, raising ValueError (with ``where`` named) on a missing key
+    or a non-finite / negative value. kd may be 0; kp and eff must be positive. Pure/CPU."""
+    out = {}
+    for key, allow_zero in (('kp', False), ('kd', True), ('eff', False)):
+        if key not in g:
+            raise ValueError('%s is missing %r' % (where, key))
+        try:
+            v = float(g[key])
+        except (TypeError, ValueError):
+            raise ValueError('%s %r is not a number: %r' % (where, key, g[key]))
+        if not math.isfinite(v) or v < 0 or (v == 0 and not allow_zero):
+            raise ValueError('%s %r must be a finite %s number: %r'
+                             % (where, key, 'non-negative' if allow_zero else 'positive', g[key]))
+        out[key] = v
+    return out
+
+
+def resolve_joint_overrides(phase, phase_drive_cfg):
+    """sim-preplace-per-joint-gains-v1: the PER-JOINT drive gain overrides to apply ENTERING ``phase``, as
+    ``{joint_name: {kp,kd,eff}}`` (empty when none configured). Opt-in via
+    ``phase_drive['carried_joint_profile'] = {phase: {joint_name: {kp,kd,eff}}}``: it OVERRIDES the uniform
+    phase gains (:func:`phase_drive_gains`) for the named joints only, leaving every other joint on the
+    uniform base. The lane's use is the carried PREPLACE approach: the base is SOFT (``carried_soft_phases``
+    kills the stiff-drive swing) and shoulder_pan is force-stiffened so it HOLDS its goal against the
+    wrist-sweep reaction (coldwin53 drifted it 0.56 rad under the soft eff 400 ceiling) while the tilt-
+    injecting wrists stay soft. Absent => {} => byte-identical. Validates joint names + gain blocks."""
+    if not phase_drive_cfg:
+        return {}
+    prof = phase_drive_cfg.get('carried_joint_profile')
+    if not prof:
+        return {}
+    if not isinstance(prof, dict):
+        raise ValueError('phase_drive.carried_joint_profile must be a mapping '
+                         '{phase: {joint_name: {kp,kd,eff}}}')
+    per_phase = prof.get(phase)
+    if not per_phase:
+        return {}
+    if not isinstance(per_phase, dict):
+        raise ValueError('phase_drive.carried_joint_profile[%r] must be a mapping '
+                         '{joint_name: {kp,kd,eff}}' % (phase,))
+    out = {}
+    for jn, g in per_phase.items():
+        if jn not in _ARM_JOINT_NAMES:
+            raise ValueError('phase_drive.carried_joint_profile[%r] has unknown arm joint %r; expected one '
+                             'of %s' % (phase, jn, list(_ARM_JOINT_NAMES)))
+        out[jn] = _validate_gain_block(g, 'phase_drive.carried_joint_profile[%r][%r]' % (phase, jn))
+    return out
+
+
+def phase_drive_plan(phase, phase_drive_cfg, arm_joints):
+    """The full per-joint gain plan to apply ENTERING ``phase``: ``{joint_name: {kp,kd,eff}}`` for each of
+    ``arm_joints``, or None (no change -- the uniform selector returned None). The base is the uniform
+    :func:`phase_drive_gains`; any ``carried_joint_profile`` override replaces its named joints. When no
+    per-joint override touches this phase the plan is the uniform gains on every joint (physically identical
+    to :func:`set_arm_drive_gains`). Pure/CPU."""
+    base = phase_drive_gains(phase, phase_drive_cfg)
+    if base is None:
+        return None
+    plan = {jn: dict(base) for jn in arm_joints}
+    for jn, g in resolve_joint_overrides(phase, phase_drive_cfg).items():
+        if jn in plan:
+            plan[jn] = dict(g)
+    return plan
+
+
+def set_arm_drive_gains_per_joint(robot, plan):
+    """Runtime re-set of the arm position-drive gains + per-joint effort ceiling from a PER-JOINT ``plan``
+    ({joint_name: {kp,kd,eff}}) -- the per-joint counterpart of :func:`set_arm_drive_gains`, same
+    articulation_controller.set_gains / set_max_efforts path. Only the plan's joints are touched; every
+    other DOF keeps its current gain/effort."""
+    arm_ctrl = robot.get_articulation_controller()
+    names = list(plan.keys())
+    idx = np.array([robot.get_dof_index(n) for n in names])
+    kps, kds = arm_ctrl.get_gains()
+    kps = np.asarray(kps, float).copy()
+    kds = np.asarray(kds, float).copy()
+    effs = np.empty(len(names), float)
+    for k, n in enumerate(names):
+        i = int(idx[k])
+        kps[i] = float(plan[n]['kp'])
+        kds[i] = float(plan[n]['kd'])
+        effs[k] = float(plan[n]['eff'])
+    arm_ctrl.set_gains(kps, kds)
+    arm_ctrl.set_max_efforts(effs, joint_indices=idx)
 
 
 def inputs(config, scenario):

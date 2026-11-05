@@ -258,6 +258,14 @@ def main():
         # incorporation ack; names a never-acknowledged ESDF at boot before the first arm motion, instead
         # of the opaque ~40 s collision_dt invariant trip (meshuris1). Absent/0 => off => byte-identical.
         esdf_boot_ack_grace_s=float(config.get('esdf_boot_ack_grace_s', 0.0)),
+        # sim-preplace-per-joint-gains-v1: carried-preplace convergence guard + wrist-first sequencing
+        # fallback. The guard names a frozen joint (PHASE_CONVERGENCE) when the preplace goal error stops
+        # shrinking for this many SIM seconds, instead of the opaque 120 s phase timeout (coldwin53:
+        # shoulder_pan froze 0.56 rad short). The sequence sweeps the wrists first at the tucked pose. Both
+        # opt-in: stall 0 / flag False => inert => byte-identical. (The PRIMARY fix is the RUNTIME per-joint
+        # phase_drive.carried_joint_profile; these are the HOST-side guard + fallback.)
+        preplace_convergence_stall_s=float(config.get('preplace_convergence_stall_s', 0.0)),
+        preplace_wrist_first=bool(config.get('preplace_wrist_first', False)),
         # sim-carton-level-carry-v1: keep the welded carton parallel to the ground through every carried
         # move (level the fold goals within the clear wrist caps) and NAME + FAIL a carried carton that
         # leaves level by more than the bound (CARTON_TILT) rather than carry it visibly tilted. A mapping
@@ -353,6 +361,11 @@ def main():
         'world_obstacles': [s['id'] for s in config.get('world_obstacles', [])],
         # sim-robust-esdf-boot-gate-v1: boot ESDF-ack grace (sim s); 0.0 => gate off (byte-identical).
         'esdf_boot_ack_grace_s': controller.esdf_boot_ack_grace_s,
+        # sim-preplace-per-joint-gains-v1: effective carried-preplace convergence guard (0 = off) + wrist-
+        # first sequencing fallback (False = off). The PRIMARY per-joint drive override is a RUNTIME key
+        # (phase_drive.carried_joint_profile), logged Isaac-side as PHASE_DRIVE_JOINT.
+        'preplace_convergence_stall_s': controller.preplace_convergence_stall_s,
+        'preplace_wrist_first': controller.preplace_wrist_first,
     }), flush=True)
     # sim-collision-dt-render-lead-floor-v1: log the DERIVED collision/feedback freshness band once at
     # host start, so every run dir's host-stack.log records the floor/ceiling in force (the future-lead
