@@ -1,0 +1,27 @@
+{
+  "_comment": "sim-place-target-between-posts-v1: the max-clearance BETWEEN-POSTS collect place-on-cart nominal. Moves the rollwagen UPPER-shelf place load-centre from the old (0.135, 0.0) to the symmetric cage centre (0.0, 0.0), which maximises the static corner-post clearance (honest carton+pad sweep: post_2/post_3 0.258 m vs 0.185 m at the old spot; min non-support 0.184 m, side-bar-limited) and keeps the carton visually centred in the cage with equal front/back wall margin. Reach-proven from the real park pose via carton_level.level_place_ik (pos_err <= 0.5 mm, tilt <= 0.001 deg, within the never-loosened 2.0 deg bound). CPU tool + CI proof: scripts/twin/restock_manipulation/place_target_between_posts.py, scripts/twin/tests/test_place_target_between_posts.py. Merge both blocks into the mission runtime-config; absent => byte-identical to the old (0.135, 0.0) runs.",
+  "_necessary_not_sufficient": "This nominal alone does NOT fix the coldwin68/coldwin69 post_2 strike. Those runs did not strike because the spot was marginal (it clears post_2 by 0.185 m at its nominal, and coldwin64 placed cleanly there). They struck because the BASE PHYSICALLY SHOVED ~0.33 m west DURING the loaded place phase (nav-trace: all three parked identically at (-4.61, 14.77) through t~195; cw68 base -4.61 -> -4.93 at t~227, cw69 -> -4.96 at t~233, both still flagged parked=True), so the arm -- executing in ur_base_link -- set the welded carton down ~0.5 m off-nominal in cart-y (landed ~(0.33, -0.52)) straight onto post_2. A ~0.5 m cart-y excursion cannot be absorbed by any spot on the 0.64 m-wide shelf with a 0.45 m carton (required margin 0.04 + 0.516 m park variance = 0.556 m >> the ~0.38 m max shelf post clearance). The blocking fix is to hold the base through the loaded set-down (full six-axis station lock from the carried pre-place) or re-resolve the place target from the live cart pose at descent time -- the collect place-descent control, tracked in lane sim-station-lock-from-preplace-v1. Adopt this nominal together with that fix.",
+  "manipulation": {
+    "cart_placement": {
+      "location": "rollwagen",
+      "support_prim": "shelf",
+      "load_center_body_xy": [0.0, 0.0],
+      "support_z_world": 0.9707,
+      "free_dimensions": [0.65, 0.45, 0.3]
+    }
+  },
+  "_cart_placement_note": "Nested block manipulation.cart_placement (isaac_factory reads this nested block; a top-level cart_placement is IGNORED -- sim-preflight-nested-cart-placement-v1). Only load_center_body_xy changes, (0.135, 0.0) -> (0.0, 0.0); support_prim/support_z_world/free_dimensions unchanged. The place TARGET is resolved cart-relative from the live cart prim (isaac_factory._gt_place_target:811-854 -> ground_truth_collect.slot_pose:106-120), so load_center_body_xy is the cart-body-frame carton centre on the upper shelf (top 0.9707 world).",
+  "initial_staging": {
+    "cart_load_center_body_xy": [0.0, 0.0]
+  },
+  "_initial_staging_note": "The ground-truth collect place_slot (ground_truth_collect.warm_slot) and the warm start_at shortcut both read initial_staging.cart_load_center_body_xy, so it MUST match manipulation.cart_placement.load_center_body_xy or cold and warm runs stage the carton at different cart-frame spots. Keep cart_support_z_world (0.9707), unit_yaws_world.cart (-pi/2) and cart_body_pose unchanged.",
+  "_clearances_mm": {
+    "old_0p135_0": {"post_2": 184.8, "post_3": 184.8, "min_nonsupport": 183.8},
+    "shipped_0_0": {"post_2": 257.9, "post_3": 257.9, "post_0": 548.1, "post_1": 548.2, "min_nonsupport": 183.8},
+    "measured_base_shove_m": 0.33,
+    "measured_cart_y_drift_m": 0.516,
+    "_note": "post_* are the honest carton+pad vs cage-post sweep minimums (cage filtered => pad-vs-post; carton vs kept bodies). min_nonsupport is side-bar-limited and flat across the shelf. Static clearance is healthy everywhere; the drift is what strikes."
+  },
+  "_preflight": "manipulation.cart_placement is already preflight-registered (config_preflight / isaac_factory._parse_cart_placement validates location / load_center_body_xy / support_z_world / free_dimensions). No new keys; the value change needs no --require addition.",
+  "_cross_reference": "Design + the honest finding: docs/restock_manipulation.md 'Place-on-cart between-posts target'. CPU verdict: python3 -m twin.restock_manipulation.place_target_between_posts. Base-hold follow-up lane: sim-station-lock-from-preplace-v1."
+}
