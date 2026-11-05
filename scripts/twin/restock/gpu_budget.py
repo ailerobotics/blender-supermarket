@@ -41,6 +41,19 @@ BASE_MISSION_MIB = 9630.0 - (FEED_FIXED_MIB
 # Safety headroom to keep free on the card (driver churn, fragmentation, transient spikes).
 DEFAULT_MARGIN_MIB = 256.0
 
+# Phase-dependent base (sim-rgbd-arm-collision-aware-v1 / sim-perception-architecture-s1 s7): the
+# mission VRAM peak is set by the STAGE, not a single number. The anchor above (BASE_MISSION_MIB)
+# is the live_pose TRANSFER peak (transfer2: 26 MiB free -- nothing more fits). The COLLECT / carry
+# / set-down stages peak lower: coldwin60-62 measured ~10.5-10.7 GB used (incl. whispr ~2252 + ONE
+# wrist feed), i.e. collect mission base = 10736 - 2252 - one wrist feed(424x240). So the mast
+# (~455) AND/OR a dynamic layer fit in collect but NOT in transfer -- the schedule (arm_feed_schedule)
+# keeps the mast OFF during live_pose transfer, and this base lets the pre-boot gate confirm a
+# mast-on COLLECT config is fits=True.
+# Wrist feed term (424x240, FEED_FIXED + per-pixel) computed inline so this constant is module-level.
+_WRIST_FEED_MIB = FEED_FIXED_MIB + 424 * 240 * FEED_BYTES_PER_PIXEL / (1024 * 1024)
+_COLLECT_PEAK_WITH_ONE_WRIST_MIB = 10736.0   # coldwin60 peak used (incl. whispr + 1 wrist feed)
+COLLECT_BASE_MISSION_MIB = _COLLECT_PEAK_WITH_ONE_WRIST_MIB - WHISPR_MIB - _WRIST_FEED_MIB
+
 
 def feed_mib(width, height, *, fixed=FEED_FIXED_MIB, bytes_per_pixel=FEED_BYTES_PER_PIXEL):
     """Estimated VRAM (MiB) for ONE masked-depth feed at ``width`` x ``height``.
@@ -129,6 +142,20 @@ def feeds_from_config(config):
         scale = _economy_from_block(block.get('economy')).resolution_scale
         feeds.append(scaled_resolution(w, h, scale) if scale != 1.0 else (w, h))
     return feeds
+
+
+def check_collect_budget(config, *, card_mib=CARD_MIB, resident_mib=WHISPR_MIB,
+                         margin_mib=DEFAULT_MARGIN_MIB):
+    """Pre-boot budget for a COLLECT/carry/set-down proof run (the ~2.9 GB-free stage).
+
+    Uses the lower collect-stage base (:data:`COLLECT_BASE_MISSION_MIB`) so a mast-on collect
+    config -- wrist (camera_0) + mast (camera_1) -- can be confirmed ``fits=True`` before boot, the
+    headroom window the phase schedule (:mod:`arm_feed_schedule`) relies on. The feeds are the
+    configured masked_depth/mast_depth feeds (same reader as the transfer check). Keep the mast OFF
+    for the ``live_pose`` transfer stage -- use :func:`check_budget` (the transfer peak) there.
+    """
+    return check_budget(feeds_from_config(config), card_mib=card_mib, resident_mib=resident_mib,
+                        base=COLLECT_BASE_MISSION_MIB, margin_mib=margin_mib)
 
 
 def _main(argv):
