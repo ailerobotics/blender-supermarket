@@ -169,10 +169,16 @@ def _contact_controller(**kwargs):
 
 
 def _press(c, t, n, **fb):
-    """Step the contact press n ticks with contact never latching; fb overrides the feedback fields."""
+    """Step the contact press n ticks with contact never latching; fb overrides the feedback fields.
+
+    sim-gripper-status-relay-v1: stamp a FRESH gripper_status_time on every packet (unless the caller
+    overrides it) so the require_suction_enabled guard sees an AUTHORITATIVE Isaac status -- the cw63 case
+    is a plugin that freshly reports not-enabled, not an absent status (which the guard must never abort on).
+    The coldwin65 starve (no status) is exercised explicitly in test_gripper_status_relay.py."""
     last = None
     for i in range(n):
-        last = c.step(.1, packet(c, t + i * .1, contact=False, **fb))
+        tick = t + i * .1
+        last = c.step(.1, packet(c, tick, contact=False, **dict(gripper_status_time=tick, **fb)))
         if last.status == 'failed' or c.phase != 'contact':
             break
     return last
@@ -226,7 +232,8 @@ def test_guard_3a_reissue_close_once_then_recovers_when_the_enable_lands():
     # step until the first boundary miss re-sends the close (exactly once), capturing that control
     reissued = False
     for i in range(15):
-        r = c.step(.1, packet(c, t + i * .1, contact=False, gripper_enabled=False))
+        r = c.step(.1, packet(c, t + i * .1, contact=False, gripper_enabled=False,
+                              gripper_status_time=t + i * .1))
         if any(ctl.get('kind') == 'gripper' and ctl['enabled'] for ctl in r.controls) and c._contact_suction:
             if c._contact_suction_miss == 1:                   # the guard-3a re-send (not the initial enable)
                 reissued = True

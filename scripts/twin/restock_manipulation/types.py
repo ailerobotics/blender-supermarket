@@ -95,6 +95,13 @@ class Sensors:
     seal_gap_mm: float | None = None           # SEAL_DIAG min_gap_mm: pad -> nearest external body (mm); None if unmeasured
     seal_pad_angle_deg: float | None = None    # SEAL_DIAG pad_vs_surface_deg: pad-forward vs the hit face normal (deg)
     seal_hit_target: bool = False              # a grippable body is under the pad (SEAL_DIAG hit_bodies non-empty)
+    # sim-gripper-status-relay-v1 (coldwin65): the sim-clock time the gripper contact-feedback above
+    # (gripper_enabled/seal_*) was SAMPLED on the Isaac side. None => the host-facing capture carried NO
+    # authoritative gripper status this tick (the fields are their inert defaults, not a measurement). The
+    # `contact_require_suction_enabled` guard reads this to tell a FRESH 'not enabled' (abort) from 'no
+    # authoritative status' (log CONTACT_STATUS_STALE, never abort on staleness alone). Default None =>
+    # byte-identical (the feedback relay is opt-in; see contact_status_feedback).
+    gripper_status_time: float | None = None
     # Driver must reject stale/absent joint/contact/odom data before making a packet.
 
 

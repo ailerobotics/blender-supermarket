@@ -16,19 +16,26 @@ from .perception import DepthPerception, load_pose_bridge
 from .types import Sensors
 
 
-def _contact_feedback_kwargs(contact):
+def _contact_feedback_kwargs(contact, now=None):
     """sim-pick-contact-seal-fallback-v1: the opt-in pick-contact feedback fields (gripper_enabled +
     SEAL_DIAG geometry) for the Sensors packet, read best-effort from the NativePanelContact. Returns the
     empty dict (=> Sensors defaults => byte-identical) on anything that lacks ``contact_feedback`` or
     raises, so the fixture/in-process contact and a probe-less run are unaffected. The host controller only
-    reads these when an opt-in guard key is on."""
+    reads these when an opt-in guard key is on.
+
+    sim-gripper-status-relay-v1: when ``now`` (the sim-clock sample time) is supplied, the dict also carries
+    ``gripper_status_time=now`` so the host can distinguish a FRESH gripper report from an absent one (the
+    host-facing CollectTargetBridge paths pass it; the legacy callers pass None and are byte-identical)."""
     fb = getattr(contact, 'contact_feedback', None)
     if not callable(fb):
         return {}
     try:
         enabled, gap, angle, hit = fb()
-        return dict(gripper_enabled=bool(enabled), seal_gap_mm=gap,
-                    seal_pad_angle_deg=angle, seal_hit_target=bool(hit))
+        kwargs = dict(gripper_enabled=bool(enabled), seal_gap_mm=gap,
+                      seal_pad_angle_deg=angle, seal_hit_target=bool(hit))
+        if now is not None:
+            kwargs['gripper_status_time'] = float(now)
+        return kwargs
     except Exception:
         return {}
 from ..restock_camera.geometry import rigid

@@ -131,7 +131,8 @@ class TransferController:
                  contact_accept_seal_diag: bool = False,
                  contact_seal_diag_dwell_ticks: int = 5,
                  contact_seal_diag_max_gap_mm: float = 0.5,
-                 contact_seal_diag_max_angle_deg: float = 1.0):
+                 contact_seal_diag_max_angle_deg: float = 1.0,
+                 contact_status_max_age_s: float = 0.0):
         self.steady_clock=steady_clock
         # sim-carton-level-place-on-cart-v1: the FK link the collect place-on-cart reach targets -- the
         # motion port's IK tcp ('gripper_pad_tcp'), NOT ur_tool0 (~0.27 m apart). The level place IK must
@@ -469,6 +470,12 @@ class TransferController:
         self.contact_seal_diag_dwell_ticks = max(1, int(contact_seal_diag_dwell_ticks))
         self.contact_seal_diag_max_gap_mm = float(contact_seal_diag_max_gap_mm)
         self.contact_seal_diag_max_angle_deg = float(contact_seal_diag_max_angle_deg)
+        # sim-gripper-status-relay-v1: an OPTIONAL extra staleness bound (sim seconds) on the gripper status
+        # the contact_require_suction_enabled guard reads. <=0 => presence-only (a packet that carries a
+        # gripper_status_time is authoritative; one that does not is 'no status'). >0 also treats a present
+        # but older-than-bound status as stale. The guard NEVER aborts on staleness alone (it logs
+        # CONTACT_STATUS_STALE and continues the bounded over-press); it aborts only on a FRESH 'not enabled'.
+        self.contact_status_max_age_s = float(contact_status_max_age_s)
         if max_age <= 0 or phase_timeout <= 0:
             raise ValueError('timeouts must be positive')
         self.motion, self.profiles = motion, profiles
@@ -833,6 +840,26 @@ class TransferController:
             return ({'kind': 'gripper', 'enabled': True},)
         return ()
 
+    def _gripper_status_fresh(self, s):
+        """sim-gripper-status-relay-v1: is there an AUTHORITATIVE, fresh Isaac gripper status this tick?
+
+        Returns ``(present, age)`` (pure). ``present`` is True when the packet carries a
+        ``gripper_status_time`` (the opt-in feedback relay populated it) AND -- when the optional
+        ``contact_status_max_age_s`` bound is set -- it is not older than the bound. ``age`` is the sim
+        seconds since the last authoritative status the controller saw (None when it has never seen one),
+        for the CONTACT_STATUS_STALE log. A packet with no ``gripper_status_time`` means the host received
+        NO gripper status (the coldwin65 starve), NOT a disabled plugin -- the guard never aborts on it."""
+        t = getattr(s, 'gripper_status_time', None)
+        if t is None:
+            age = (None if self._gripper_status_last_time is None
+                   else max(0.0, float(s.simulation_time) - float(self._gripper_status_last_time)))
+            return False, age
+        self._gripper_status_last_time = float(t)
+        age = max(0.0, float(s.simulation_time) - float(t))
+        if self.contact_status_max_age_s > 0.0 and age > self.contact_status_max_age_s:
+            return False, age
+        return True, age
+
     def _reregister_place(self, s, now):
         """fm390 PERCEIVE step. After the base has driven to place_approach in front of the rollwagen
         mouth, re-read the live deck target in the NEW arm-base frame and rebuild the place-side poses
@@ -974,6 +1001,11 @@ class TransferController:
         self._contact_seal_dwell = 0    # consecutive ticks the geometric seal diagnostic held (guard 3b)
         self._contact_suction_miss = 0  # over-press-step boundaries reached with the plugin not enabled (guard 3a)
         self._contact_seal_disagree_logged = False  # CONTACT_SOURCE_DISAGREE printed once per op
+        # sim-gripper-status-relay-v1 (coldwin65): per-op freshness tracking for the require_suction_enabled
+        # guard. _gripper_status_last_time is the sim time of the last packet that carried an authoritative
+        # gripper status; _contact_status_stale_logged throttles the CONTACT_STATUS_STALE line to once per op.
+        self._gripper_status_last_time = None
+        self._contact_status_stale_logged = False
         self._contact_progress_wall = None  # fm425: wall time of the last contact-phase progress (per op)
         self._press_sim_start = None    # sim time the current unconfirmed pre-weld press began (see __init__)
         self._grasp_confirm = 0         # fm395: consecutive confirmed-attachment ticks in grasp
@@ -3119,24 +3151,44 @@ class TransferController:
                         return self._result(self._contact_reissue_controls(s))
                     self._contact_freeze = 0
                     # sim-pick-contact-seal-fallback-v1 guard 3a: the settle has elapsed and we are about to
-                    # press deeper. If the plugin never reported enabled (the cw63 lost-command case), do NOT
-                    # press on with no chance of a latch: fail fast by name, or (reissue_close_once) re-send
-                    # the close ONCE and hold for a second settle; a second miss fails. Inert when the key is
-                    # off => the historical over-press step (byte-identical).
-                    if self.contact_require_suction_enabled and not s.gripper_enabled:
-                        self._contact_suction_miss += 1
-                        diag = ('gap_mm=%s pad_deg=%s hit_target=%s enabled=%s step=%.1fmm'
-                                % (s.seal_gap_mm, s.seal_pad_angle_deg, s.seal_hit_target,
-                                   s.gripper_enabled, self._contact_step * 1000))
-                        if self.contact_reissue_close_once and self._contact_suction_miss == 1:
-                            print('CONTACT_SUCTION_REISSUE miss=1 re-sending the gripper close once (%s)'
-                                  % diag, flush=True)
-                            return self._result(({'kind': 'gripper', 'enabled': True},))
-                        return self._fail('CONTACT_SUCTION_NOT_ENABLED at over-press step %d (%s): the '
-                                          'gripper never reported enabled/closing -- the enable command did '
-                                          'not land (one-shot control lost to the last-value status relay); '
-                                          'refusing to press further into the carton'
-                                          % (self._contact_suction_miss, diag))
+                    # press deeper. If the plugin FRESHLY reported not-enabled (the cw63 lost-command case),
+                    # do NOT press on with no chance of a latch: fail fast by name, or (reissue_close_once)
+                    # re-send the close ONCE and hold for a second settle; a second miss fails. Inert when
+                    # the key is off => the historical over-press step (byte-identical).
+                    #
+                    # sim-gripper-status-relay-v1 (coldwin65): the guard must read an AUTHORITATIVE Isaac
+                    # gripper state, not a starved host snapshot. When no fresh status reached the host
+                    # (gripper_status_time absent/too old -- the whole coldwin65 cause), REFUSE TO JUDGE: log
+                    # CONTACT_STATUS_STALE with the age and fall through to the bounded over-press -- never
+                    # abort CONTACT_SUCTION_NOT_ENABLED on staleness alone (which falsely blamed the enable
+                    # command for a feedback-relay gap). A genuine FRESH not-enabled still fails fast.
+                    if self.contact_require_suction_enabled:
+                        present, age = self._gripper_status_fresh(s)
+                        if not present:
+                            if not self._contact_status_stale_logged:
+                                self._contact_status_stale_logged = True
+                                print('CONTACT_STATUS_STALE age=%s bound=%.2fs step=%.1fmm: no authoritative '
+                                      'Isaac gripper status reached the host (gripper_status_time absent) -- '
+                                      'refusing to judge suction-enabled on staleness alone; continuing the '
+                                      'bounded over-press (enable the feedback relay: '
+                                      'RESTOCK_CONTACT_STATUS_FEEDBACK=1)'
+                                      % (('%.3f' % age) if age is not None else 'never',
+                                         self.contact_status_max_age_s, self._contact_step * 1000),
+                                      flush=True)
+                        elif not s.gripper_enabled:
+                            self._contact_suction_miss += 1
+                            diag = ('gap_mm=%s pad_deg=%s hit_target=%s enabled=%s age=%.3fs step=%.1fmm'
+                                    % (s.seal_gap_mm, s.seal_pad_angle_deg, s.seal_hit_target,
+                                       s.gripper_enabled, age, self._contact_step * 1000))
+                            if self.contact_reissue_close_once and self._contact_suction_miss == 1:
+                                print('CONTACT_SUCTION_REISSUE miss=1 re-sending the gripper close once (%s)'
+                                      % diag, flush=True)
+                                return self._result(({'kind': 'gripper', 'enabled': True},))
+                            return self._fail('CONTACT_SUCTION_NOT_ENABLED at over-press step %d (%s): the '
+                                              'gripper reported not enabled/closing with a FRESH Isaac status '
+                                              '-- the close did not take (suction off / plugin never latched); '
+                                              'refusing to press further into the carton'
+                                              % (self._contact_suction_miss, diag))
                     if self._contact_step + self.contact_overpress_step_m <= self.contact_overpress_cap_m + 1e-9:
                         self._contact_step += self.contact_overpress_step_m
                         self.issued = False
