@@ -207,20 +207,34 @@ def test_cw44_overhang_and_cw45_height(bodies):
 
 # --------------------------------------------------------------- 5. preflight
 
+def _rt(cp):
+    # The preflight reads the NESTED block the factory reads (config['manipulation']['cart_placement']).
+    return {'manipulation': {'cart_placement': cp}}
+
+
 def test_preflight_support_selection_valid_and_invalid():
-    assert cpf.check_support_selection({'cart_placement': {'support_prim': 'shelf'}}, stock_supports=STOCK) == []
-    assert cpf.check_support_selection({'cart_placement': {'support_prim': 1}}, stock_supports=STOCK) == []
+    assert cpf.check_support_selection(_rt({'support_prim': 'shelf'}), stock_supports=STOCK) == []
+    assert cpf.check_support_selection(_rt({'support_prim': 1}), stock_supports=STOCK) == []
     assert cpf.check_support_selection({}, stock_supports=STOCK) == []            # absent -> no-op
-    bad = cpf.check_support_selection({'cart_placement': {'support_prim': 'nope'}}, stock_supports=STOCK)
+    bad = cpf.check_support_selection(_rt({'support_prim': 'nope'}), stock_supports=STOCK)
+    assert bad and 'support_prim' in bad[0]
+
+
+def test_preflight_support_selection_reads_nested_not_top_level():
+    # sim-preflight-nested-cart-placement-v1: a VALID top-level selector must NOT mask an INVALID nested
+    # one -- the factory reads the nested block, so the gate must too (coldwin47 class).
+    cfg = {'cart_placement': {'support_prim': 'shelf'},            # top-level, valid -- IGNORED
+           'manipulation': {'cart_placement': {'support_prim': 'nope'}}}  # nested, invalid -- READ
+    bad = cpf.check_support_selection(cfg, stock_supports=STOCK)
     assert bad and 'support_prim' in bad[0]
 
 
 def test_preflight_support_height_shelf_top_consistent():
     """verify_place / descent on the SHELF top: the runtime + scenario place heights must agree with the
     resolved shelf top (0.9712 world). A stale value is refused; the shelf top passes."""
-    runtime = {'cart_placement': {'support_z_world': 0.9712}}
+    runtime = _rt({'support_z_world': 0.9712})
     scenario = {'initial_staging': {'cart_support_z_world': 0.9712}}
     assert cpf.check_support_height(runtime, scenario, resolved_top_z=0.9712) == []
-    stale = cpf.check_support_height({'cart_placement': {'support_z_world': 0.9325}}, {},
+    stale = cpf.check_support_height(_rt({'support_z_world': 0.9325}), {},
                                      resolved_top_z=0.9712)
     assert len(stale) == 1 and '0.9325' in stale[0]
