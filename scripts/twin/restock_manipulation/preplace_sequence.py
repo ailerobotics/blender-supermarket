@@ -49,6 +49,36 @@ def wrist_first_subgoals(start: Sequence[float], standoff: Sequence[float], *,
     return tuple(leg1), tuple(g)
 
 
+# The joints HELD through the pan-FIRST leg (everything but shoulder_pan): the wrists + lift + elbow stay at
+# the compact carry shape while shoulder_pan sweeps to the standoff, then extend. See pan_first_subgoals.
+HOLD_NONPAN_JOINTS = (1, 2, 3, 4, 5)   # all but ur_shoulder_pan_joint
+
+
+def pan_first_subgoals(start: Sequence[float], standoff: Sequence[float], *,
+                       hold: Sequence[int] = HOLD_NONPAN_JOINTS
+                       ) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    """Return ``(pan_leg, standoff)`` sub-goals for the pan-FIRST preplace reorder
+    (sim-preplace-sweep-cage-clearance-v1).
+
+    The INVERSE ordering of :func:`wrist_first_subgoals`: ``pan_leg`` = the standoff with every joint in
+    ``hold`` (default all but shoulder_pan) kept at its ``start`` (compact carry) value, so shoulder_pan
+    sweeps to the standoff FIRST while the arm stays TUCKED at the carry shape -- then the second leg extends
+    the wrists / lift / elbow to the standoff. coldwin70 reconstruction: with the EXISTING wrist-first order
+    the arm EXTENDS to the standoff shape (elbow 1.0 -> 1.48) BEFORE the pan sweep, so leg-2 rotates the
+    extended, low gripper HOUSING on an arc that rakes the +x mouth post (/Rollwagen/chassis/post_2) and the
+    upper side-wall bar at shoulder_pan ~ 0.20 (the -48 mm strike that froze the run). Sweeping the pan while
+    the arm is still TUCKED keeps the end-effector compact and high through the arc (CPU reconstruction:
+    cage clearance +252 mm vs -48 mm), THEN the extend happens over the open deck. Pure/CPU; raises
+    ValueError on a non-6 / non-finite input."""
+    s = _vec6(start, 'start')
+    g = _vec6(standoff, 'standoff')
+    leg1 = list(g)
+    for i in set(int(i) for i in hold):
+        if 0 <= i < 6:
+            leg1[i] = s[i]
+    return tuple(leg1), tuple(g)
+
+
 def _vec6(v, name):
     out = [float(x) for x in v]
     if len(out) != 6 or not all(math.isfinite(x) for x in out):
