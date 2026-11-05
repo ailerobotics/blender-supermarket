@@ -89,10 +89,12 @@ def run(args):
                                       obstacle_prims={n: p for d in authored.values() for n, p in d.items()},
                                       arm_contacts=True)
         import twin.tools.arm_carry_bench as cbench
+        # The mission's soft carry drive gains (run_arm_carry_bench REF_SOFT: stiffness, damping, max_effort).
+        drive_gains = cbench.DriveGains(1.0e5, 2.0e3, 400.0)
         for s in scenarios:
             # Restrict the clearance read to this scenario's obstacles.
             stage.obstacles = dict(authored[s.id])
-            spec = cbench.TrialSpec(s.id, cbench.DriveGains(), cbench.CarryProfile(
+            spec = cbench.TrialSpec(s.id, drive_gains, cbench.CarryProfile(
                 peak_speed=args.carry_speed, peak_accel=args.carry_accel))
             goals = [(f'wp{i}', list(w)) for i, w in enumerate(bench.build_trajectory(s))]
             moves = carry._run_trial(stage, spec, goals, args.dt, args.max_sim_s)
