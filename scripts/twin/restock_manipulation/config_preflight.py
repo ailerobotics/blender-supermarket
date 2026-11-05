@@ -296,6 +296,18 @@ def check_carton_level(host_cfg):
             "standoff (_preplace_above_place_goal), so with neither it is silently inert. Set "
             "'preplace_above_support': true (the shelf-correct lane) so the droop-compensated, densified, "
             "speed/accel-capped carried approach actually drives the preplace.")
+    # sim-preplace-approach-seeded-v1: the branch-seeded interior solve only changes the WORLD-level pre-place
+    # approach (plan_level_world_approach anchor 'seeded'), which is driven only when the preplace level gate
+    # engages. 'preplace_seeded_interior' ON with 'preplace_level_gate' OFF is silently inert (the same
+    # key-in-the-wrong-place class), so refuse it loudly rather than ship a run that believes the interior is
+    # seeded while it drives the ungated approach.
+    if getattr(resolved, 'preplace_seeded_interior', False) \
+            and not getattr(resolved, 'preplace_level_gate', False):
+        problems.append(
+            "carton_level 'preplace_seeded_interior' is ON but 'preplace_level_gate' is OFF: the branch-seeded "
+            "interior solve only changes the world-level pre-place approach the gate drives, so with the gate "
+            "off it is silently inert. Set 'preplace_level_gate': true (with 'preplace_above_support': true) "
+            "so the seeded interior actually plans the preplace approach.")
     return problems
 
 
