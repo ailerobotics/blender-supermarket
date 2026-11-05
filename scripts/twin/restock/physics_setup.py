@@ -741,13 +741,19 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # full lock reuses its target attitude; config_preflight.check_station_full_brake refuses it without).
     _station_place_full_brake=bool(config.get('station_place_full_brake'))
     _station_place_full_brake_effort_limit=config.get('station_place_full_brake_effort_limit')
+    # sim-station-lock-from-preplace-v1 (opt-in RUNTIME, default 'place' => byte-identical): WHEN the full
+    # lock engages relative to the carried pre-place ('place' = today, at the descent; 'preplace' = at the
+    # start of leg 1; 'hold_firm' = the moment a carried joint is firmed). config_preflight registers the
+    # key and refuses it without station_place_full_brake / chassis_station_pitch_hold.
+    _station_full_brake_engage_phase=config.get('station_full_brake_engage_phase')
     controller=MobileController(stage,paths['base_link'],cart_path,
         [paths['left_wheel_joint'],paths['right_wheel_joint']],spec=spec,
         drive_max_force=_wd.get('max_force'), drive_damping=_wd.get('damping'),
         station_pitch_hold=_station_pitch_hold,
         station_hold_roll_deg=_station_hold_roll, station_hold_pitch_deg=_station_hold_pitch,
         station_place_full_brake=_station_place_full_brake,
-        station_place_full_brake_effort_limit=_station_place_full_brake_effort_limit)
+        station_place_full_brake_effort_limit=_station_place_full_brake_effort_limit,
+        station_full_brake_engage_phase=_station_full_brake_engage_phase)
     if _station_pitch_hold:
         print('CHASSIS_STATION_PITCH_HOLD enabled (sim-only workaround, like CAGE_COLLISION): the '
               'station brake LATCHES a rotation-lock at the TARGET attitude (roll=%.2f pitch=%.2f deg, '
@@ -756,10 +762,12 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     if _station_place_full_brake:
         print('STATION_PLACE_FULL_BRAKE enabled (sim-only, sim-station-full-brake-place-v1): the LOADED '
               'collect place descent FULL-locks the base (translation+rotation @target roll=%.2f pitch=%.2f '
-              'deg) over place->release->retreat, then returns to the rotation-only station hold; effort '
-              'guard limit=%s N·m'
+              'deg) over %s->release->retreat, then returns to the rotation-only station hold; effort '
+              'guard limit=%s N·m [engage_phase=%s]'
               % (_station_hold_roll,_station_hold_pitch,
-                 _station_place_full_brake_effort_limit), flush=True)
+                 controller.station_full_brake_engage_phase,
+                 _station_place_full_brake_effort_limit,
+                 controller.station_full_brake_engage_phase), flush=True)
     # fm433: confirm the wheel-drive tune actually reached the joints at runtime (run-326 applied it -- the
     # mission.usda carried maxForce/damping -- but it left no log, so 'applied vs not' could not be read
     # from the console; the tune turned out ineffective for the base's intrinsic under-tracking, which is a

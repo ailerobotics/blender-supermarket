@@ -60,12 +60,14 @@ class _StatefulMobile:
         self.full_locked = False
         self.rotation_hold = False
         self.base_full = False
+        self.full_lock_from = None
         self.events = []
 
-    def engage_station_full_lock(self):          # idempotent while locked (like the real method)
+    def engage_station_full_lock(self, from_phase=None):   # idempotent while locked (like the real method)
         if not self.full_locked:
             self.full_locked = True
             self.rotation_hold = False           # release_brake() inside the real engage clears the hold
+            self.full_lock_from = from_phase     # sim-station-lock-from-preplace-v1: the engage phase
             self.events.append('full_lock_on')
 
     def release_station_full_lock(self):
@@ -148,6 +150,193 @@ def test_full_lock_only_at_collect_station():
     mobile, trace = _drive([('transfer', 'place'), ('transfer', 'retreat')])
     assert all(not full for _, full, _ in trace)
     assert 'full_lock_on' not in mobile.events
+
+
+# =========================================== (1b) sim-station-lock-from-preplace-v1 engage-phase predicate
+def test_resolve_engage_phase_defaults_and_validates():
+    # None / '' / the literal 'place' => today's behaviour.
+    assert sfb.resolve_engage_phase(None) == 'place'
+    assert sfb.resolve_engage_phase('') == 'place'
+    assert sfb.resolve_engage_phase('place') == 'place'
+    # the opt-in triggers (case / whitespace tolerant).
+    assert sfb.resolve_engage_phase('preplace') == 'preplace'
+    assert sfb.resolve_engage_phase('  HOLD_FIRM ') == 'hold_firm'
+    for bad in ('grasp', 'lift', 'x', 0, True):
+        with pytest.raises(ValueError):
+            sfb.resolve_engage_phase(bad)
+
+
+def test_full_lock_window_place_is_todays_window():
+    # default 'place': the descent window only; pre-place is NOT locked (rotation-only hold).
+    for phase in ('place', 'release', 'retreat'):
+        assert sfb.full_lock_window('collect', phase, 'place')
+    assert not sfb.full_lock_window('collect', 'preplace', 'place')
+    assert not sfb.full_lock_window('collect', 'preplace', 'place', hold_firm_fired=True)
+    for phase in ('approach', 'grasp', 'lift', 'stow', 'verify'):
+        assert not sfb.full_lock_window('collect', phase, 'place')
+
+
+def test_full_lock_window_preplace_extends_backward_before_leg_1():
+    # 'preplace': locked for the WHOLE pre-place phase (both legs), regardless of hold-firm, plus the
+    # descent window -- the base is pinned BEFORE leg 1 starts.
+    assert sfb.full_lock_window('collect', 'preplace', 'preplace')
+    assert sfb.full_lock_window('collect', 'preplace', 'preplace', hold_firm_fired=False)
+    for phase in ('place', 'release', 'retreat'):
+        assert sfb.full_lock_window('collect', phase, 'preplace')
+    # still never before the arm reaches pre-place.
+    assert not sfb.full_lock_window('collect', 'lift', 'preplace')
+
+
+def test_full_lock_window_hold_firm_arms_at_the_firm_event():
+    # 'hold_firm': locked during pre-place only once a carried joint is firmed (end of leg 1), then the
+    # descent window as usual.
+    assert not sfb.full_lock_window('collect', 'preplace', 'hold_firm', hold_firm_fired=False)
+    assert sfb.full_lock_window('collect', 'preplace', 'hold_firm', hold_firm_fired=True)
+    for phase in ('place', 'release', 'retreat'):
+        assert sfb.full_lock_window('collect', phase, 'hold_firm', hold_firm_fired=False)
+
+
+def test_full_lock_window_only_collect_station():
+    for ep in ('place', 'preplace', 'hold_firm'):
+        assert not sfb.full_lock_window('transfer', 'place', ep, hold_firm_fired=True)
+        assert not sfb.full_lock_window('couple', 'preplace', ep, hold_firm_fired=True)
+
+
+# ===================================== (1c) engage-phase state machine (preplace / hold_firm before leg 2)
+def _drive_engage(steps, engage_phase):
+    """Step _apply_base_brake through (action, phase, hold_firm_fired) steps under an engage_phase key,
+    recording the locked state. Mirrors the port's per-tick state: gate() sets _hold_firm_fired before
+    advance() -> _apply_base_brake reads it."""
+    port = IsaacPort.__new__(IsaacPort)
+    port.mobile = _StatefulMobile()
+    port._full_brake_engage_phase = engage_phase
+    trace = []
+    for action, phase, firmed in steps:
+        port.current_action = action
+        port._phase = phase
+        port._hold_firm_fired = firmed
+        port._apply_base_brake(action in SENSING_ACTIONS, True, phase)
+        trace.append((phase, firmed, port.mobile.full_locked))
+    return port.mobile, trace
+
+
+# coldwin68/69: parked at (-4.61,14.77) -- the same spot as the no-shove reference coldwin64 -- but the
+# firm-held carried PRE-PLACE's leg-2 shoulder_pan sweep shoved the base ~0.33 m sideways over sim t~191-227
+# (carton came down ~0.5 m off its cart-relative target onto a cage post). Leg 1 settles, the wrists firm
+# (PREPLACE_HOLD_FIRM) at the end of leg 1 (~t191), THEN leg 2 sweeps and the shove builds. (t, phase,
+# hold_firm_fired, base_dxy_m from the standoff.)
+COLDWIN68_PREPLACE = [
+    (185.0, 'preplace', False, 0.000),   # leg 1 begins, held at the standoff
+    (190.0, 'preplace', False, 0.004),   # leg 1 running (still tiny)
+    (191.0, 'preplace', True,  0.006),   # <<< PREPLACE_HOLD_FIRM: wrists firmed, end of leg 1
+    (200.0, 'preplace', True,  0.090),   # leg 2 shoulder_pan sweep -> shove building, past 0.080
+    (210.0, 'preplace', True,  0.210),
+    (227.0, 'preplace', True,  0.330),   # <<< peak shove ~0.33 m (carton ~0.5 m off target)
+    (232.0, 'place',    True,  0.332),   # descent BEGINS -- today's 'place' engage point (too late)
+]
+LEG2_SWEEP_START_DXY = 0.080   # the base is still under this when leg 2 begins at t~200
+
+
+def test_preplace_engage_locks_before_leg_1_and_before_the_shove():
+    mobile, trace = _drive_engage([('collect', ph, f) for _, ph, f, _ in COLDWIN68_PREPLACE], 'preplace')
+    # locked from the FIRST pre-place tick (t185, dxy 0.000) -- before leg 1, before any shove.
+    first = trace[0]
+    assert first == ('preplace', False, True)
+    assert all(full for _, _, full in trace)                 # stays locked through place
+    assert mobile.events.count('full_lock_on') == 1          # one engage, no cycling
+    assert mobile.full_lock_from == 'preplace'               # logged as engaged from pre-place
+
+
+def test_hold_firm_engage_locks_at_the_firm_event_before_leg_2_sweep():
+    mobile, trace = _drive_engage([('collect', ph, f) for _, ph, f, _ in COLDWIN68_PREPLACE], 'hold_firm')
+    # NOT locked during leg 1 (before the firm event)...
+    assert trace[0] == ('preplace', False, False)
+    assert trace[1] == ('preplace', False, False)
+    # ...locked from the firm event (t191), and the base is still under 0.080 there -- BEFORE the leg-2
+    # sweep shove builds.
+    firm_idx = next(i for i, s in enumerate(COLDWIN68_PREPLACE) if s[2])
+    assert COLDWIN68_PREPLACE[firm_idx][3] < LEG2_SWEEP_START_DXY
+    assert trace[firm_idx][2] is True                        # locked exactly at the firm event
+    assert all(full for _, _, full in trace[firm_idx:])      # stays locked
+    assert mobile.events.count('full_lock_on') == 1          # one engage, no cycling
+    assert mobile.full_lock_from == 'preplace'               # firm fires while phase is pre-place
+
+
+def test_place_engage_only_locks_at_the_descent_after_the_shove():
+    # the default 'place' key reproduces coldwin68: the base is NOT locked through the whole pre-place
+    # shove, only once the descent begins at 'place' -- far too late (carton already landed off target).
+    mobile, trace = _drive_engage([('collect', ph, f) for _, ph, f, _ in COLDWIN68_PREPLACE], 'place')
+    for (_, ph, _firm, _dxy), (_, _, full) in zip(COLDWIN68_PREPLACE, trace):
+        assert full == (ph == 'place')
+    # the lock engages only at the final 'place' tick, by which point the shove already peaked at 0.33 m.
+    assert trace[-1][2] is True and trace[-1][0] == 'place'
+    shove_before_place = max(dxy for _, ph, _f, dxy in COLDWIN68_PREPLACE if ph == 'preplace')
+    assert shove_before_place == pytest.approx(0.330)
+    assert mobile.events.count('full_lock_on') == 1
+
+
+def test_engage_phase_default_is_byte_identical_to_todays_place():
+    # omitting the key entirely (getattr default) == engage_phase 'place' == today's behaviour.
+    port = IsaacPort.__new__(IsaacPort)
+    port.mobile = _StatefulMobile()
+    # no _full_brake_engage_phase attr set, no _hold_firm_fired attr set (the __new__ bare port)
+    for _, ph, _firm, _dxy in COLDWIN68_PREPLACE:
+        port.current_action = 'collect'
+        port._phase = ph
+        port._apply_base_brake(True, True, ph)
+    # locked only at the 'place' descent (pre-place never locked) -- the pre-key behaviour.
+    assert port.mobile.events.count('full_lock_on') == 1
+    assert port.mobile.full_lock_from == 'place'             # only 'place' triggered a lock
+
+
+class _HoldFirmStub:
+    """Stand-in for HoldFirmOnArrival: fires the given joint on the Nth observe (the end-of-leg-1 arrival)."""
+
+    def __init__(self, fire_on_tick):
+        self.fire_on_tick = fire_on_tick
+        self.n = 0
+        self.resets = 0
+
+    def observe(self, cmd, measured):
+        self.n += 1
+        return ['ur_wrist_2_joint'] if self.n == self.fire_on_tick else []
+
+    def reset(self):
+        self.resets += 1
+
+
+def test_apply_hold_firm_arms_and_clears_the_full_lock_latch():
+    # the integration seam: _apply_hold_firm SETS _hold_firm_fired when a carried joint is firmed (so
+    # _apply_base_brake's 'hold_firm' trigger fires), and CLEARS it on leaving pre-place (a later op re-arms).
+    port = IsaacPort.__new__(IsaacPort)
+    port._hold_firm = _HoldFirmStub(fire_on_tick=2)
+    port._hold_firm_cfg = {'firm': {'kp': 1e6, 'kd': 1e4, 'eff': 2000.0}}
+    port._hold_firm_phase = None
+    port._hold_firm_fired = False
+    port.robot = NS()                 # non-None; set_arm_drive_gains_per_joint raises + is caught (latch set first)
+    port.native_transport = None
+    port.command_gate = NS(_last_cmd_q=(0.0,) * 6, measured=lambda: (0.0,) * 6)
+    # leg 1, tick 1: no joint firmed yet -> latch stays disarmed.
+    port._apply_hold_firm('preplace')
+    assert port._hold_firm_fired is False
+    # tick 2: the wrist firms (PREPLACE_HOLD_FIRM) -> latch arms, before the leg-2 sweep.
+    port._apply_hold_firm('preplace')
+    assert port._hold_firm_fired is True
+    # leaving pre-place (descent) clears the latch (place/release/retreat lock via the descent window).
+    port._apply_hold_firm('place')
+    assert port._hold_firm_fired is False
+    assert port._hold_firm.resets >= 1
+
+
+def test_apply_hold_firm_noop_when_off():
+    # config off (_hold_firm is None) => never touches the latch => byte-identical.
+    port = IsaacPort.__new__(IsaacPort)
+    port._hold_firm = None
+    port.robot = NS()
+    port._hold_firm_fired = False
+    port._hold_firm_phase = None
+    port._apply_hold_firm('preplace')
+    assert port._hold_firm_fired is False
 
 
 # ============================================================ (2) coldwin49 shove-timeline replay
@@ -341,3 +530,46 @@ def test_preflight_refuses_bad_effort_limit():
             {'station_place_full_brake': True, 'chassis_station_pitch_hold': True,
              'station_place_full_brake_effort_limit': bad})
         assert any('effort_limit' in p for p in problems), bad
+
+
+# ==================================== (4b) sim-station-lock-from-preplace-v1 engage-phase key validation
+_WITH_BRAKE = {'station_place_full_brake': True, 'chassis_station_pitch_hold': True}
+
+
+def test_preflight_accepts_place_and_preplace_engage_with_brake():
+    assert check_station_full_brake(dict(_WITH_BRAKE, station_full_brake_engage_phase='place')) == []
+    assert check_station_full_brake(dict(_WITH_BRAKE, station_full_brake_engage_phase='preplace')) == []
+
+
+def test_preflight_refuses_unknown_engage_phase():
+    problems = check_station_full_brake(dict(_WITH_BRAKE, station_full_brake_engage_phase='grasp'))
+    assert any('station_full_brake_engage_phase' in p for p in problems)
+
+
+def test_preflight_refuses_hold_firm_without_hold_firm_config():
+    # 'hold_firm' needs the pre-place hold-firm-on-arrival config or its trigger never fires.
+    problems = check_station_full_brake(dict(_WITH_BRAKE, station_full_brake_engage_phase='hold_firm'))
+    assert any('hold_firm_on_arrival' in p for p in problems)
+    # a disabled block is still refused.
+    problems = check_station_full_brake(dict(
+        _WITH_BRAKE, station_full_brake_engage_phase='hold_firm',
+        phase_drive={'hold_firm_on_arrival': {'enabled': False}}))
+    assert any('hold_firm_on_arrival' in p for p in problems)
+
+
+def test_preflight_accepts_hold_firm_with_hold_firm_config():
+    assert check_station_full_brake(dict(
+        _WITH_BRAKE, station_full_brake_engage_phase='hold_firm',
+        phase_drive={'hold_firm_on_arrival': {'enabled': True}})) == []
+
+
+def test_preflight_refuses_engage_phase_without_the_brake():
+    # a dangling engage key without the full brake would silently never activate -- refuse it.
+    problems = check_station_full_brake({'station_full_brake_engage_phase': 'preplace'})
+    assert problems and 'station_place_full_brake' in problems[0]
+    # but the absent / default 'place' key is a no-op even without the brake (byte-identical).
+    assert check_station_full_brake({'station_full_brake_engage_phase': 'place'}) == []
+    assert check_station_full_brake({}) == []
+    # a dangling UNKNOWN value is still refused (and names the bad value).
+    problems = check_station_full_brake({'station_full_brake_engage_phase': 'bogus'})
+    assert problems and 'station_place_full_brake' in problems[0]
