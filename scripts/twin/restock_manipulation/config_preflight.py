@@ -349,6 +349,18 @@ def check_carton_level(host_cfg):
             "interior solve only changes the world-level pre-place approach the gate drives, so with the gate "
             "off it is silently inert. Set 'preplace_level_gate': true (with 'preplace_above_support': true) "
             "so the seeded interior actually plans the preplace approach.")
+    # sim-preplace-pan-first-seeded-leg2-v1: the carry-connected branch preference REPLACES the reaction
+    # branch's min-|wrist_2| selection rule, so it is driven only on the reaction-branch standoff path
+    # (_preplace_above_place_goal with preplace_reaction_branch on). ON with preplace_reaction_branch OFF is
+    # silently inert (the same key-in-the-wrong-place class), so refuse it loudly rather than ship a run that
+    # believes it chose the carry-connected branch while it drove the single level_place_ik standoff.
+    if getattr(resolved, 'preplace_branch_prefer_carry_connected', False) \
+            and not getattr(resolved, 'preplace_reaction_branch', False):
+        problems.append(
+            "carton_level 'preplace_branch_prefer_carry_connected' is ON but 'preplace_reaction_branch' is "
+            "OFF: the carry-connected preference is the reaction-branch selector's branch rule, so with the "
+            "reaction branch off it is silently inert. Set 'preplace_reaction_branch': true (with "
+            "'preplace_level_gate' and 'preplace_above_support') so the carry-connected standoff is chosen.")
     return problems
 
 

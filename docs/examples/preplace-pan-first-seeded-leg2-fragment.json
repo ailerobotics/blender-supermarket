@@ -1,0 +1,78 @@
+{
+  "_comment": "sim-preplace-pan-first-seeded-leg2-v1: the coldwin72 pan-first LEG-2 fix. Captain's rule UNCHANGED: the carton stays parallel to the ground, 2.0 deg bound / 0.15 s grace, NEVER loosened. coldwin72 -- the first run with every physical fix stacked (pick sealed, the pan swept the cage clear with the base locked + low arm effort, the wrist held) -- was stopped BEFORE any motion by the carton-level continuity gate in the re-ordered PAN-FIRST leg 2 (PR 366): the reaction-natural standoff (min |wrist_2| = 0.668) sits on a DIFFERENT carton-level basin than the carry/tucked shape (wrist_2 ~0), so the leg-2 wrist_2 held ~0 for nine waypoints then JUMPED 0.300 rad in one step (> the 0.15 rad continuity limit the soft wrist can track) -> CARTON_LEVEL_PLAN_REJECTED at waypoint 10/18 (host-stack.log ln 18617). This single HOST key adds preplace_branch_prefer_carry_connected ON TOP of the coldwin72 (preplace-wrist-continuity + preplace-sweep-cage-clearance) block. Merge into the mission runtime-config HOST carton_level block (read by scripts/twin/restock_manipulation/ros_host.py -> TransferController). Absent/false => the min-|wrist_2| settling branch (byte-identical).",
+
+  "_root_cause": {
+    "seeded_already_applied": "CPU-reproduced on the cw72 URDF + logged joints: plan_level_world_approach(anchor='seeded') on the leg-2 vectors returns waypoints_n=18, max_wrist_step=0.3003, worst_step_wp=10, wp9 wrist_2=0.0 -> wp10 wrist_2=0.3003 -- byte-for-byte the host-stack.log reject. So the PR 349 seeded interior was ALREADY applied to leg 2; it is not a seeding bug.",
+    "disconnected_basins": "With shoulder_pan held at the STANDOFF value (pan-first leg 2) and the wrist_1 self-collision cap (0.65) in force, the carry/tucked shape (wrist_2 ~0) and the reach-valid reaction-natural standoff (wrist_2 0.668) are on DISCONNECTED carton-level basins. Numerical continuation of the standoff branch backward needs wrist_1 to rise to 1.30 at the start position (far over the 0.65 cap), so the cap chops the standoff branch off below t~0.5; the start branch (wrist_2 ~0) is the only level branch for t<=0.47. The minimum crossing step is ~0.2 rad > the 0.15 clamp, and the crossing TILT ridge minimum is ~2.44 deg > the 2.0 bound (CPU-proven, for EVERY wrist_1 cap) -- so NO continuous monotonic <=0.15 level path exists and the seeding cannot help.",
+    "fix": "Choose the standoff on the branch CONNECTED to the carry shape (wrist_2 ~ the carry wrist_2, ~0.09 on cw72), where leg 2 is a monotonic extension the continuity gate accepts (max wrist step 0.143 rad <= 0.15, predicted tilt 0.52 deg <= 2.0). The PR 359 firm wrist hold now covers the soft-wrist drift that originally pushed PR 345 to the 0.668 settling branch, so the ~0 branch is admissible again (firstmate decision B)."
+  },
+
+  "_mechanism": "controller._preplace_above_place_goal, when preplace_branch_prefer_carry_connected is on (requires preplace_reaction_branch + preplace_level_gate + preplace_above_support), calls carton_level.select_carry_connected_standoff instead of select_reaction_natural_standoff. It enumerates reach+level+self-clear branches seeded from BOTH the carry shape and the reach shape with wrist_2 swept (enumerate_carry_connected_branches; level_place_ik multi-starts wrist_3 x wrist_1 internally), ranks by total wrist travel from the carry shape, builds each candidate's leg-2 world-level plan (the SAME anchor the controller drives -- 'seeded' when preplace_seeded_interior), and returns the FIRST branch whose plan the continuity gate ACCEPTS (step <= preplace_max_wrist_step_rad AND tilt <= bound_deg). The gate stays the authority; the search is bounded by preplace_branch_select_budget_s and validates at most the 8 closest branches (healthy path ~1-4 validations). Logs PREPLACE_REACTION_BRANCH chosen wrist_2=... reason=carry-connected with the carry wrist travel, the leg-2 gate step/tilt, and the ranked branches.",
+
+  "_requires": "preplace_reaction_branch=true (it is that selector's branch rule -- config_preflight refuses carry-connected-on + reaction-branch-off as silently inert), with preplace_level_gate + preplace_above_support (the standoff path it drives) and preplace_seeded_interior (the leg-2 anchor it validates and the controller drives). Keep the station-hold mirror (station_pitch_hold / station_hold_pitch_deg / station_hold_roll_deg) so the carton levels in the WORLD frame across both legs.",
+
+  "env": {
+    "RESTOCK_PLACE_ON_DECK": "1",
+    "RESTOCK_COLLECT_GROUND_TRUTH": "1",
+    "RESTOCK_VERIFY_PLACE": "1",
+    "_note": "UNCHANGED from coldwin72."
+  },
+
+  "host_config": {
+    "_file": "scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py -> TransferController). The integration lane OWNS the actual run config; the key below is the ONLY one this lane adds on top of the coldwin72 block (preplace_wrist_first + preplace_pan_first + the carton_level block from preplace-wrist-continuity-fragment.json + preplace-sweep-cage-clearance-fragment.json).",
+    "preplace_wrist_first": true,
+    "preplace_pan_first": true,
+    "station_pitch_hold": true,
+    "station_hold_pitch_deg": -1.17,
+    "station_hold_roll_deg": 0.0,
+    "collect_place_preplace_shape": [0.093, -1.91, 2.014, -0.103, 1.664, 0.0],
+    "carry_lift_shape": [1.2675, -2.27, 1.0, 0.65, 0.8, -1.2545],
+    "carry_wrist1_cap": 0.65,
+    "carry_wrist2_min": 0.0,
+    "preplace_budget_margin_s": 90.0,
+    "carton_level": {
+      "preplace_level_gate": true,
+      "preplace_reaction_branch": true,
+      "preplace_seeded_interior": true,
+      "preplace_branch_prefer_carry_connected": true,
+      "preplace_max_wrist_step_rad": 0.15,
+      "preplace_soft_effort_nm": 56.0,
+      "preplace_max_segment_rad": 0.08,
+      "preplace_approach_speed": 0.05,
+      "preplace_approach_accel": 0.05,
+      "preplace_branch_select_budget_s": 8.0,
+      "preplace_above_support": true,
+      "preplace_support_clearance_m": 0.08,
+      "place_from_above": true,
+      "place_above_clearance_m": 0.08,
+      "place_contact_release": true,
+      "place_contact_gap_m": 0.012,
+      "gravity_compensation": {"stiffness_nm_per_rad": 2850, "carton_mass_kg": 0.45},
+      "_new_key_note": "NEW this lane: preplace_branch_prefer_carry_connected (true => select the carry-connected standoff branch whose pan-first leg-2 the continuity gate accepts, instead of the min-|wrist_2| 0.668 settling branch that the leg-2 cannot reach in <= 0.15 rad steps at the standoff pan). Default off => byte-identical (the min-|wrist_2| branch). preplace_branch_select_budget_s is KEPT at 8.0 (the carry-connected search measured ~3.8 s CPU on the real cw72 inputs -- comparable to the min-|wrist_2| selector's ~2 s, well under the budget and the render-paced ~16-30 s wall of the 5 sim-s HOST_STATUS_WATCHDOG). All other keys KEPT from coldwin72."
+    }
+  },
+
+  "runtime_config": {
+    "_file": "mission-runtime-*.json (EXTERNAL to the repo; the integration lane owns it). UNCHANGED from coldwin72.",
+    "manipulation": {
+      "stations": {
+        "chassis_station_pitch_hold": true,
+        "chassis_station_pitch_hold_pitch_deg": -1.17,
+        "chassis_station_pitch_hold_roll_deg": 0.0
+      },
+      "station_place_full_brake": true
+    }
+  },
+
+  "acceptance_coldwin73": {
+    "_lane": "sim-preplace-pan-first-seeded-leg2-v1 -- coldwin73 = coldwin72 + preplace_branch_prefer_carry_connected:true. Captain's rule UNCHANGED: 2.0 deg bound / 0.15 s grace, NEVER loosened.",
+    "branch_logged": "PREPLACE_REACTION_BRANCH chosen wrist_2 ~0.09 rad reason=carry-connected (NOT 0.668); the console shows carry wrist travel + leg-2 max wrist step ~0.14 rad (<= 0.15) + predicted tilt ~0.5 deg (<= 2.0).",
+    "leg2_accepted": "NO CARTON_LEVEL_PLAN_REJECTED in the pan-first leg 2 -- wrist_2 is a monotonic extension start->standoff (no 0.300 rad cross-branch jump); the run ADVANCES PAST the preplace (the base lock / contact release / placement check finally run, for the first time).",
+    "both_legs_converge": "Both legs converge within the derived phase budget (no 'phase timeout: preplace'); 0 HOST_STATUS_WATCHDOG (the carry-connected search builds in ~3.8 s CPU, far under the budget and the render-paced wall of the 5 sim-s watchdog).",
+    "carton_level": "CARTON_TICK world tilt peak <= 1.5 deg over both legs AND the place descent; no CARTON_TILT trip.",
+    "place": "the full D6 base lock engages at place start (base drift <= 0.02 m), the weld releases at true shelf contact (PLACE_CONTACT_RELEASE), verify_place passes, and the run ADVANCES PAST collect.",
+    "a_b_note": "To reproduce the coldwin72 reject set preplace_branch_prefer_carry_connected:false (the min-|wrist_2| 0.668 standoff): the console then shows CARTON_LEVEL_PLAN_REJECTED ... 0.300 rad wrist step at waypoint 10/18 and the HOST_FAULT_ESTOP at phase=preplace."
+  },
+
+  "_bounded_gpu_proof": "Re-run the coldwin72 collect place-on-cart capstone chain under /tmp/aile-gpu.lock (HEAVY_MB respected; whispr ~2.2 GB) with this HOST block merged (preplace_branch_prefer_carry_connected true, PR 359 + PR 365 + PR 366 ON). Expected PASS: HOST_EFFECTIVE_CONFIG / the PREPLACE_REACTION_BRANCH line shows reason=carry-connected chosen wrist_2 ~0.09; NO CARTON_LEVEL_PLAN_REJECTED in leg 2; the pan sweep + the wrist/lift/elbow extend both complete; the carton stays <= 2.0 deg through both legs and the place descent; the place + contact-gated release complete and the run advances past collect."
+}
