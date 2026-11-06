@@ -780,7 +780,10 @@ class TransferController:
                 contact_gap_mm=(None if cl.place_release_contact_gap_mm is None
                                 else float(cl.place_release_contact_gap_mm)),
                 support_tokens=cl.place_support_tokens,
-                obstruction_gap_mm=cl.place_obstruction_gap_mm)
+                obstruction_gap_mm=cl.place_obstruction_gap_mm,
+                stall_height_margin_m=(
+                    None if getattr(cl, 'place_release_stall_height_margin_m', None) is None
+                    else float(cl.place_release_stall_height_margin_m)))
         # sim-place-preplace-above-support-v1: which above-place lane re-targeted the collect preplace
         # standoff ('support' | 'place') and its carton-bottom clearance above the resolved support top,
         # set when _preplace_above_place_goal engages (for the engaged-standoff log).
