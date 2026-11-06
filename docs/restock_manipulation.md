@@ -422,6 +422,40 @@ unknown value or `"hold_firm"` without the hold-firm config. The 2.0° carton bo
 trigger (`preplace`) + acceptance: `docs/examples/station-lock-from-preplace-fragment.json`; CPU proof:
 `scripts/twin/tests/test_station_full_brake.py`.
 
+### Clear the pre-place pan sweep of the cart cage (sim-preplace-sweep-cage-clearance-v1)
+
+With the base fully locked (above) and the wrist held firm, coldwin70's leg-2 shoulder_pan sweep **stalled
+hard** (a 1632.7 N·m effort spike, `STATION_FULL_BRAKE_ABORT`), froze at `shoulder_pan` 0.2012 (commanded
+−0.4053) and failed `PHASE_CONVERGENCE`. CPU reconstruction of the executed sweep at the real park pose
+(`scripts/check_preplace_sweep_clearance.py`, from the nav-trace poses + the `CARTON_TICK` joints) names the
+contact: the wrist-first order **extends** the arm to the standoff shape *before* the pan sweep, so leg 2
+rotates the already-extended, low **gripper end-effector housing** (the robot links `cube_without_surface_plates`
+/ `surface_plate_1`) on an arc that rakes `/Rollwagen/chassis/post_2` (the +x mouth post, −48 mm) and the upper
+side-wall bar `side_0_horizontal_6` at `shoulder_pan ≈ 0.20` — exactly the freeze. It is the **arm, not the
+carton**: the carton is cage-filtered (`cage_collision: filtered` keeps deck/shelf/drawbar), so only an
+*unfiltered* robot link can be the sim contact (cw69's `SEAL_DIAG hit_bodies=['/Rollwagen/chassis/post_2']`
+`min_gap_mm 0.0` is the same contact).
+
+Two opt-in pieces, both default off ⇒ byte-identical, compatible with the base lock (PR 365) and the firm
+wrist hold (PR 359):
+
+- **Pan-first reorder** (HOST `preplace_pan_first`, requires `preplace_wrist_first`): leg 1 sweeps
+  `shoulder_pan` to the standoff while the wrists + lift + elbow **hold at the compact carry shape**
+  (`PREPLACE_PAN_FIRST`), then leg 2 extends over the open deck. The tucked arc clears the mouth post/side bar
+  by **+252 mm** (vs −48 mm); the carton is re-leveled in leg 2's extend and the 2.0° bound is untouched.
+- **Cage-clearance gate** (injected `controller._preplace_cage_clearance`, built by
+  `place_clearance.preplace_cage_clearance_provider` from the live coupled cart pose + host XRDF): refuses an
+  **intersecting** leg-2 sweep by name before motion — `PREPLACE_SWEEP_CLEARANCE prim=… min_clearance=…mm` —
+  instead of the blind jam. It sweeps the cuMotion **arm sphere** model (the real robot-link set incl. the
+  housing) against the cage bodies (`place_clearance.cage_body_names`), refuse margin default 0.0 (an actual
+  penetration — the CPU geometry carries a documented ~40–90 mm offset from the sim colliders, and the standoff
+  itself sits an inherent +4.2 mm from the far wall, within that noise). The ≥ 0.04 m clearing margin is the
+  design target the reorder meets on the raking bodies.
+
+Recommended ON values + bounded-GPU acceptance: `docs/examples/preplace-sweep-cage-clearance-fragment.json`;
+CPU proof: `scripts/check_preplace_sweep_clearance.py`, `scripts/twin/tests/test_preplace_sweep_clearance.py`;
+write-up: `data/sim-preplace-sweep-cage-clearance-v1/report.md`.
+
 ## Contact-gated place-descent release (sim-place-release-on-contact-v1)
 
 The collect deck set-down releases the weld the instant the support is **actually touched**, not at a

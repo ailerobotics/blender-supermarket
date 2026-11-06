@@ -35,6 +35,24 @@ import numpy as np
 # Log tokens the controller/pre-flight print.
 PLACE_CLEARANCE = 'PLACE_CLEARANCE'
 PLACE_CLEARANCE_REJECTED = 'PLACE_CLEARANCE_REJECTED'
+# sim-preplace-sweep-cage-clearance-v1: the carried PRE-PLACE leg-2 shoulder_pan sweep's cage-clearance
+# log / refuse tokens (see preplace_cage_arm_clearance / preplace_sweep_reject below).
+PREPLACE_SWEEP_CLEARANCE = 'PREPLACE_SWEEP_CLEARANCE'
+# Minimum arm-link-to-cage gap (m) the leg-2 pan sweep must keep to NOT be refused. coldwin70 reconstructs
+# the executed leg-2 at -48 mm INTO /Rollwagen/chassis/post_2 (it froze at shoulder_pan 0.2012 with a 1632.7
+# N*m effort spike). The DEFAULT refuse margin is 0.0 -- an actually INTERSECTING (penetrating) sweep -- for
+# two honest reasons: (1) the CPU geometry carries a documented ~40-90 mm offset from the sim colliders (the
+# pad/arm sphere model vs the authored AABBs, the same calibration caveat the place-clearance block above
+# notes), so only a clear negative reading is a certain strike; (2) the pan-at-carry reorder that clears the
+# RAKING strike to +252 mm still ends at the pre-place standoff, whose gripper housing sits an inherent
+# +4.2 mm from the FAR side wall (side_1_horizontal_6) -- a cage-width tightness within that calibration
+# noise, NOT the cw70 blocker -- so a positive refuse margin would block even a clearing path. The >= 0.04 m
+# target is the DESIGN GOAL the clearing path meets on the raking cage bodies (post_*/side_0), checked by
+# scripts/check_preplace_sweep_clearance.py; the lane may raise the margin via the provider.
+DEFAULT_PREPLACE_CAGE_MARGIN_M = 0.0
+# The design-target clearing margin (m) the reorder achieves on the raking cage bodies (reported, not the
+# refuse threshold): the brief's >= 0.04 m.
+PREPLACE_CAGE_CLEAR_TARGET_M = 0.040
 
 # Default minimum gap (m) the swept gripper+carton must keep from every NON-support Rollwagen body
 # until the carton bottom is flat on the support. 30 mm matches the brief's margin.
@@ -457,3 +475,101 @@ def clearance_summary(per_body_min, *, support=SUPPORT_BODIES, worst_n=4):
     def fmt(items):
         return ', '.join('%s=%.1fmm' % (k, v * 1000.0) for v, k in items)
     return '%s min non-support: %s | support: %s' % (PLACE_CLEARANCE, fmt(nonsupport), fmt(sup))
+
+
+# -------------------- carried pre-place leg-2 pan-sweep vs the cart cage (sim-preplace-sweep-cage-clearance-v1)
+# The place-clearance sweep above checks the welded carton + suction PAD at the SET-DOWN. The carried
+# PRE-PLACE leg-2 (PREPLACE_WRIST_FIRST "move hold joints to standoff") swings the whole end-effector on a
+# shoulder_pan arc from the carry pan to the standoff pan. coldwin70 reconstruction (nav-trace park pose +
+# the executed CARTON_TICK joints): the GRIPPER END-EFFECTOR HOUSING -- the robot links the cuMotion sphere
+# model covers (``cube_without_surface_plates`` / ``surface_plate_1``), NOT the carton -- rakes
+# ``/Rollwagen/chassis/post_2`` (front mouth post) and the upper side-wall bar ``side_0_horizontal_6`` as the
+# arc crosses the +x mouth at shoulder_pan ~ 0.20 rad, where the executed pan FROZE (0.2012) with a 1632.7
+# N*m effort spike (cw69 SEAL_DIAG hit_bodies=['/Rollwagen/chassis/post_2'] min_gap_mm 0.0 is the same
+# contact). Crucially the carton is cage-FILTERED (``cage_collision: filtered`` keeps deck/shelf/drawbar), so
+# the carton CANNOT be the sim contact -- only an UNFILTERED robot link can, which is why this gate sweeps the
+# cuMotion ARM SPHERE model (``world_obstacles.arm_spheres_world``), not the pad geometry: the pad-only honest
+# sweep reads +11 mm clear there while the real housing penetrates post_2 by 48 mm.
+
+def preplace_cage_arm_clearance(configs, urdf_path, xrdf_path, bodies, T_base_cart, *,
+                                include=None):
+    """Min cuMotion-arm-sphere clearance (m) to each cart body over the carried leg-2 ``configs``.
+
+    ``configs``: the leg-2 waypoint arm configs (ARM_JOINTS order lists or dicts). ``bodies``: the cart-frame
+    ``{name: (lo, hi)}`` AABBs from :func:`rollwagen_collider_boxes`. ``T_base_cart``: the cart-body ->
+    ur_base_link 4x4 (the coupled/parked geometry). ``include``: optional iterable of body names to keep
+    (default all). Returns ``{body: min arm-sphere clearance over the sweep}`` -- negative = an arm link
+    penetrates that cart body. Pure/CPU (needs the URDF FK + the XRDF sphere model, same as the host)."""
+    from twin.restock_host import world_obstacles as wo
+    from twin.restock_manipulation.cad_tool import ARM_JOINTS
+    bodies_base = _bodies_in_base(bodies, T_base_cart)
+    keep = set(bodies_base) if include is None else {n for n in bodies_base if n in set(include)}
+    boxes = [wo.Box(name, tuple(np.asarray(hi, float) - np.asarray(lo, float)),
+                    tuple((np.asarray(lo, float) + np.asarray(hi, float)) / 2.0), (0.0, 0.0, 0.0))
+             for name, (lo, hi) in bodies_base.items() if name in keep]
+    per_body_min = {}
+    for cfg in configs:
+        c = cfg if isinstance(cfg, dict) else {j: float(cfg[i]) for i, j in enumerate(ARM_JOINTS)}
+        centres, radii, _owners = wo.arm_spheres_world(str(urdf_path), str(xrdf_path), c)
+        for box in boxes:
+            g = float(wo.clearance(box, centres, radii))
+            if box.id not in per_body_min or g < per_body_min[box.id]:
+                per_body_min[box.id] = g
+    return per_body_min
+
+
+def preplace_sweep_reject(per_body_min, *, margin=DEFAULT_PREPLACE_CAGE_MARGIN_M, support=SUPPORT_BODIES):
+    """The :data:`PREPLACE_SWEEP_CLEARANCE` refuse message when any NON-support cart body's minimum arm-sphere
+    clearance over the leg-2 sweep is below ``margin``, else ``None``. ``support`` bodies (deck/shelf -- the
+    surface the carton will land on) are excluded: the preplace approach rides above them. Names the worst
+    prim + its min_clearance so the lane sees exactly which cage body the sweep would strike."""
+    support = set(support)
+    bad = sorted((v, k) for k, v in per_body_min.items() if k not in support and v < margin)
+    if not bad:
+        return None
+    worst_v, worst_k = bad[0]
+    named = ', '.join('%s=%.1fmm' % (k, v * 1000.0) for v, k in bad)
+    return ('%s prim=%s min_clearance=%.1fmm (margin %.0f mm; cage bodies below it: %s) -- the carried '
+            'pre-place shoulder_pan sweep would drive an arm link into a Rollwagen cage body (the gripper '
+            'housing rakes the +x mouth post/side bar, coldwin70 froze here at a 1632.7 N*m effort spike). '
+            'Refusing before motion.' % (PREPLACE_SWEEP_CLEARANCE, worst_k, worst_v * 1000.0,
+                                         margin * 1000.0, named))
+
+
+def cage_body_names(bodies):
+    """The CAGE body names in ``bodies`` (posts + side/back wall bars) -- the set the carried leg-2 pan
+    sweep rakes. Excludes the horizontal supports (deck/shelf) the carton lands on and the drawbar (the
+    arm base sits a fixed ~34 mm from the tow bar at the carry hold, a standing clearance the sweep does
+    not change)."""
+    return [n for n in bodies if is_cage_body(n)]
+
+
+def preplace_cage_clearance_provider(urdf_path, xrdf_path, cart_pose, *, bodies=None,
+                                     margin=DEFAULT_PREPLACE_CAGE_MARGIN_M, include=None, cal_offset_m=0.0):
+    """Build the ``callable(waypoints) -> reject|None`` the controller injects as its preplace cage-clearance
+    gate (sim-preplace-sweep-cage-clearance-v1). Opt-in: the controller leaves the hook ``None`` (byte-
+    identical) unless a boot/integration layer supplies this provider with the live coupled cart pose + the
+    host XRDF.
+
+    ``cart_pose``: the cart-body -> ur_base_link pose ((x, y, z, yaw) or 4x4). ``bodies``: cart-frame AABBs
+    (default :func:`rollwagen_collider_boxes`, needs usd-core). ``include``: cart-body names to check
+    (default the CAGE bodies -- posts + side/back bars). ``margin``: refuse threshold (m). Returns a closure
+    that, given a list of ARM_JOINTS-order waypoint configs, returns the :func:`preplace_sweep_reject`
+    message or ``None``. The closure applies ``cal_offset_m`` (subtracted from every clearance, a SEAL-
+    anchored calibration knob) before the margin test."""
+    from twin.restock_manipulation.cart_world_obstacle import cart_pose_matrix
+    if bodies is None:
+        bodies = rollwagen_collider_boxes()
+    keep = cage_body_names(bodies) if include is None else list(include)
+    T_base_cart = cart_pose_matrix(cart_pose)
+
+    def _gate(waypoints):
+        if not waypoints:
+            return None
+        per_body = preplace_cage_arm_clearance(waypoints, urdf_path, xrdf_path, bodies, T_base_cart,
+                                               include=keep)
+        if cal_offset_m:
+            per_body = {k: v - float(cal_offset_m) for k, v in per_body.items()}
+        return preplace_sweep_reject(per_body, margin=margin)
+
+    return _gate

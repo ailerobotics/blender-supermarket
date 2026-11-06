@@ -120,6 +120,7 @@ class TransferController:
                  transfer_service_carry: bool = False,
                  esdf_boot_ack_grace_s: float = 0.0,
                  preplace_convergence_stall_s: float = 0.0, preplace_wrist_first: bool = False,
+                 preplace_pan_first: bool = False,
                  preplace_drift_recapture_rad: float = 0.0, preplace_drift_recapture_max: int = 0,
                  carton_level=None, fk_urdf=None, place_tcp_link='gripper_pad_tcp',
                  station_pitch_hold: bool = False, station_hold_roll_deg: float = 0.0,
@@ -693,6 +694,20 @@ class TransferController:
         # joints move. Both opt-in (stall 0 / flag False => inert => byte-identical).
         self.preplace_wrist_first = bool(preplace_wrist_first)
         self._preplace_wristed = False   # wrist-first sub-stage flag (mirrors _retreat_lifted)
+        # sim-preplace-sweep-cage-clearance-v1: the PAN-FIRST preplace reorder (opt-in, default off =>
+        # byte-identical). coldwin70: the wrist-first order EXTENDS the arm before the pan sweep, so leg-2
+        # rotates the extended gripper housing on an arc that rakes /Rollwagen/chassis/post_2 + the upper
+        # side-wall bar at shoulder_pan ~ 0.20 (the -48 mm strike that froze the run at a 1632.7 N*m spike).
+        # When this is on AND wrist-first is on, the first leg sweeps shoulder_pan to the standoff while the
+        # arm stays TUCKED at the carry shape (CPU: cage clearance +252 mm vs -48 mm), then the second leg
+        # extends. Requires preplace_wrist_first (it reuses that two-leg machinery, just the inverse hold).
+        self.preplace_pan_first = bool(preplace_pan_first)
+        # Injected cage-clearance gate (sim-preplace-sweep-cage-clearance-v1): callable(waypoints)->reject|None
+        # built by the boot/integration layer from the live coupled cart pose + the host XRDF
+        # (place_clearance.preplace_cage_clearance_provider). None (default) => the gate is inert (byte-
+        # identical); when set, _issue_gated_preplace_approach refuses an intersecting leg-2 sweep BY NAME
+        # (PREPLACE_SWEEP_CLEARANCE prim=... min_clearance=...) before motion, instead of the blind jam.
+        self._preplace_cage_clearance = None
         # sim-preplace-leg2-level-v1: the held chassis attitude during the station place. The collect place
         # pins the base at a non-level parking-brake attitude (chassis_station_pitch_hold_pitch_deg /
         # _roll_deg), so ur_base_link +Z is off world +Z and the shoulder_pan YAW axis is off vertical -- a
@@ -1596,6 +1611,21 @@ class TransferController:
         if step_reject is not None:
             print(step_reject, flush=True)
             return self._fail(step_reject)
+        # sim-preplace-sweep-cage-clearance-v1: refuse a carried pan sweep whose waypoints would drive an arm
+        # link into a Rollwagen cage body (post / side-wall bar) BY NAME before motion, instead of the blind
+        # ~1632 N*m jam + opaque PHASE_CONVERGENCE timeout (coldwin70: the gripper housing raked
+        # /Rollwagen/chassis/post_2 at shoulder_pan ~ 0.20). Inert unless the boot/integration layer injected
+        # the provider (self._preplace_cage_clearance, built by place_clearance.preplace_cage_clearance_provider
+        # from the live coupled cart pose + host XRDF) => byte-identical off.
+        if self._preplace_cage_clearance is not None:
+            try:
+                cage_reject = self._preplace_cage_clearance(list(waypoints))
+            except Exception as _cage_exc:        # a provider error must never crash the op
+                cage_reject = None
+                print('PREPLACE_SWEEP_CLEARANCE skipped (provider error: %s)' % _cage_exc, flush=True)
+            if cage_reject is not None:
+                print(cage_reject, flush=True)
+                return self._fail(cage_reject)
         pk_v, pk_a = cl.path_peak_joint_speed(waypoints, speed=cl_cfg.preplace_approach_speed,
                                               accel=cl_cfg.preplace_approach_accel)
         worst = max(plan.max_roll, plan.max_pitch)
@@ -2867,15 +2897,28 @@ class TransferController:
                     # than out-author it). The carton stays level via the SAME leveled approach below; only
                     # the GOAL of this leg changes. Off => the single standoff approach (byte-identical).
                     if self.preplace_wrist_first and not self._preplace_wristed:
-                        from twin.restock_manipulation.preplace_sequence import wrist_first_subgoals
-                        preplace_shape, _ = wrist_first_subgoals(s.joint_positions, preplace_shape)
+                        from twin.restock_manipulation.preplace_sequence import (
+                            wrist_first_subgoals, pan_first_subgoals)
+                        # sim-preplace-sweep-cage-clearance-v1: pan-FIRST reorder (opt-in). Sweep shoulder_pan
+                        # to the standoff while the arm stays tucked at the carry shape (leg 1 holds the wrists
+                        # + lift + elbow at their carry value), then extend -- so the arc does not rake the
+                        # cage mouth. Default off => wrist-first (byte-identical).
+                        if self.preplace_pan_first:
+                            preplace_shape, _ = pan_first_subgoals(s.joint_positions, preplace_shape)
+                        else:
+                            preplace_shape, _ = wrist_first_subgoals(s.joint_positions, preplace_shape)
                         # sim-preplace-leg2-level-v1: under the held chassis attitude the standoff wrists are
                         # world-level only AT the standoff pan; held at the CARRY pan (leg 1) they sit off the
                         # cone, so re-solve the leg-1 goal's wrist cluster for level-IN-WORLD at the carry pan
                         # (lift/elbow stay at the standoff). Then leg 1 ends world-level and leg 2's pan sweep
                         # stays world-level throughout. base_R None (hold off) => the standoff wrists verbatim
-                        # (byte-identical to the prior wrist-first leg 1).
-                        if self._carton_base_R is not None and self._carton_up_in_tool_world is not None:
+                        # (byte-identical to the prior wrist-first leg 1). Skipped for the pan-FIRST reorder:
+                        # its leg 1 deliberately HOLDS the wrists at the compact carry shape (already the
+                        # transport-level pose) so the arm stays tucked through the pan sweep -- re-solving
+                        # the wrist cluster here would extend/change them and defeat the clearance (the carton
+                        # is re-leveled in leg 2's extend).
+                        if (not self.preplace_pan_first
+                                and self._carton_base_R is not None and self._carton_up_in_tool_world is not None):
                             from twin.restock_manipulation import carton_level as _cl1
                             from twin.restock_manipulation.cad_tool import ARM_JOINTS as _AJ1
                             _robot = self._fk_model()
@@ -2891,9 +2934,14 @@ class TransferController:
                                 except ValueError as _exc:
                                     print('PREPLACE_WRIST_FIRST leg-1 world-level unsolved: %s '
                                           '(using the standoff wrists; CARTON_TILT owns it)' % _exc, flush=True)
-                        print('PREPLACE_WRIST_FIRST leg 1: driving the wrists + leveling cluster to the '
-                              'standoff while shoulder_pan holds at carry (sim-preplace-per-joint-gains-v1)',
-                              flush=True)
+                        if self.preplace_pan_first:
+                            print('PREPLACE_PAN_FIRST leg 1: sweeping shoulder_pan to the standoff while the '
+                                  'arm holds the tucked carry shape (wrists+lift+elbow), so the arc clears '
+                                  'the cage mouth (sim-preplace-sweep-cage-clearance-v1)', flush=True)
+                        else:
+                            print('PREPLACE_WRIST_FIRST leg 1: driving the wrists + leveling cluster to the '
+                                  'standoff while shoulder_pan holds at carry (sim-preplace-per-joint-gains-v1)',
+                                  flush=True)
                     # sim-preplace-per-joint-gains-v1: ARM the frozen-joint convergence guard against THIS
                     # leg's goal so a non-converging preplace (coldwin53: shoulder_pan froze 0.56 rad short) is
                     # named PHASE_CONVERGENCE in seconds instead of the opaque 120 s timeout. The small wrist

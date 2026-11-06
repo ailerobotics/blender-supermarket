@@ -308,6 +308,13 @@ def main():
         # phase_drive.carried_joint_profile; these are the HOST-side guard + fallback.)
         preplace_convergence_stall_s=float(config.get('preplace_convergence_stall_s', 0.0)),
         preplace_wrist_first=bool(config.get('preplace_wrist_first', False)),
+        # sim-preplace-sweep-cage-clearance-v1: PAN-FIRST reorder (opt-in, needs preplace_wrist_first).
+        # coldwin70: the wrist-first order EXTENDS the arm before the pan sweep, so leg-2 rotates the
+        # extended gripper housing on an arc that rakes /Rollwagen/chassis/post_2 + the upper side bar at
+        # shoulder_pan ~ 0.20 (the -48 mm strike that froze the run at 1632.7 N*m). Pan-first sweeps the pan
+        # to the standoff while the arm stays TUCKED at the carry shape (CPU: cage clearance +252 mm vs
+        # -48 mm), then extends. Absent/false => wrist-first => byte-identical.
+        preplace_pan_first=bool(config.get('preplace_pan_first', False)),
         # sim-preplace-wrist2-hold-v1: opt-in DRIFT RE-CAPTURE on the convergence guard. When a driven
         # preplace joint drifts off its closest approach by more than preplace_drift_recapture_rad, the
         # guard re-issues the goal (re-driving the back-driven wrist) up to preplace_drift_recapture_max
@@ -513,6 +520,8 @@ def main():
         # (phase_drive.carried_joint_profile), logged Isaac-side as PHASE_DRIVE_JOINT.
         'preplace_convergence_stall_s': controller.preplace_convergence_stall_s,
         'preplace_wrist_first': controller.preplace_wrist_first,
+        # sim-preplace-sweep-cage-clearance-v1: pan-first reorder (True => sweep pan while tucked).
+        'preplace_pan_first': controller.preplace_pan_first,
         # sim-preplace-wrist2-hold-v1: effective drift re-capture bound (rad) + per-joint budget (0 = off).
         'preplace_drift_recapture_rad': controller.preplace_drift_recapture_rad,
         'preplace_drift_recapture_max': controller.preplace_drift_recapture_max,

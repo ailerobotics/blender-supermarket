@@ -116,6 +116,7 @@ KEY_CONSUMER = {
     # fallback (ros_host -> TransferController). Both opt-in, default off => byte-identical.
     'preplace_convergence_stall_s': HOST,
     'preplace_wrist_first': HOST,
+    'preplace_pan_first': HOST,              # sim-preplace-sweep-cage-clearance-v1: sweep pan while tucked (clears the cage mouth)
     # sim-preplace-wrist2-hold-v1: drift re-capture on the convergence guard (re-issue a back-driven joint
     # instead of faulting). Both opt-in, default 0 => off => byte-identical.
     'preplace_drift_recapture_rad': HOST,
