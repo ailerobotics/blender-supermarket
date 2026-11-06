@@ -1,0 +1,82 @@
+{
+  "_comment": "sim-preplace-branch-descent-feasible-v1: the coldwin79 place-DESCENT-feasible standoff select. Captain's rule UNCHANGED: the carton stays parallel to the ground, 2.0 deg bound / 0.15 s grace, NEVER loosened. coldwin79 sealed the pick and converged the pre-place, then the carton-level PLACE-DESCENT gate refused the set-down BEFORE motion because the descent from the chosen standoff would roll the carton 3.43 deg > 2.0 (host-stack.log ln 24922: CARTON_LEVEL_PLAN_REJECTED predicted peak roll=3.43 pitch=1.90 -> HOST_FAULT_ESTOP phase=place). Runs 76/77/78 descended level from the SAME configuration. This single HOST key adds preplace_descent_feasible ON TOP of the coldwin73 (preplace-pan-first-seeded-leg2) block. Merge into the mission runtime-config HOST carton_level block (read by scripts/twin/restock_manipulation/ros_host.py -> TransferController). Absent/false => the greedy first-leg-2-accepted carry-connected branch (byte-identical).",
+
+  "_root_cause": {
+    "named": "carton_level.select_carry_connected_standoff (carton_level.py) ranked candidate standoffs ONLY by carry travel + the leg-2 continuity gate and greedily returned the FIRST leg-2-accepted branch; it NEVER checked whether the later PLACE DESCENT from that standoff keeps the carton level. controller._preplace_above_place_goal drives it and does not re-check either -- the CARTON_LEVEL_PLACE_DESCENT gate (controller.py) is the ONLY descent check, and it runs AFTER the standoff is committed, at the place phase, so an infeasible choice e-stops.",
+    "why_a_lottery": "The candidate set (enumerate_carry_connected_branches) and each branch's leg-2 continuity step (plan_level_world_approach, a branch-basin solve) depend on the run's MEASURED carry pose and SENSED place target, which vary a few mm / mrad run-to-run. coldwin79's place=(0.956,0.077,0.538) vs coldwin76's (0.957,0.07,0.538) differ by ~7 mm in y, yet the greedy first-accepted winner flipped from a ~0.59 wrist_2 branch (descent ~1.8 deg, level -- cw76/77/78) to the low wrist_2=0.052 branch (host-stack.log ln 18641), whose descent rolls 3.43 deg -- refused. The set-down was a lottery between runs.",
+    "cpu_reproduced": "On the coldwin79 URDF + logged vectors the REAL place-descent predictor (the gate's own plan_compensated_place_descent, seeded from the leveled collect_place_preplace_shape) classifies the low-wrist_2 standoff branches as descent-INFEASIBLE (w2=0.018 -> 10.4 deg, w2=0.059 -> 3.54 deg ~ the logged 3.43) and the mid-wrist_2 branches as FEASIBLE (w2 0.49/0.60/0.73 -> ~1.80/1.79/1.77 deg). test_preplace_branch_descent_feasible_v1.py::test_cw79_low_wrist2_descent_infeasible_mid_feasible pins it.",
+    "fix": "Hand the selector a descent_predictor (the SAME plan_compensated_place_descent the place gate runs, from each CANDIDATE standoff to the resolved support), DISCARD any candidate whose predicted descent exceeds bound_deg, and choose DETERMINISTICALLY by the stable key (least carry travel, then descent tilt, then leg-2 max wrist step, then wrist_2 closest to carry) -- independent of the search time / enumeration order. So a low-wrist_2 branch the leg-2 gate happens to accept is still discarded when its descent is infeasible, and the chosen standoff is one the place gate will also accept."
+  },
+
+  "_mechanism": "controller._preplace_above_place_goal, when preplace_descent_feasible is on (requires preplace_branch_prefer_carry_connected), builds controller._preplace_descent_predictor (place target = poses['place'], IK seed = the leveled collect_place_preplace_shape via _level_place_goal, base-frame carton up-axis, the default loaded GravityCompensation, the same from_above / place_above_clearance_m / place_depth_bias_m / path_waypoints options the gate uses) and passes descent_predictor= to carton_level.select_carry_connected_standoff. The selector evaluates the descent tilt for every leg-2-accepted candidate, discards those > bound_deg, and returns the descent-feasible branch of least carry travel. Logs PREPLACE_BRANCH_CANDIDATES n=.. chosen=w2=.. descent_tilt=.. leg2_step=.. with the ranked candidates (each w2: leg2_step / descent_tilt). The 2.0 deg bound is UNTOUCHED; the leg-2 continuity gate stays the authority for the approach.",
+
+  "_requires": "preplace_branch_prefer_carry_connected=true (the descent filter lives inside that selector -- config_preflight refuses preplace_descent_feasible-on + carry-connected-off as silently inert), which itself requires preplace_reaction_branch + preplace_level_gate + preplace_above_support + preplace_seeded_interior (the coldwin73 block). Keep the station-hold mirror so the carton levels in the WORLD frame. UNCHANGED otherwise from coldwin73.",
+
+  "env": {
+    "RESTOCK_PLACE_ON_DECK": "1",
+    "RESTOCK_COLLECT_GROUND_TRUTH": "1",
+    "RESTOCK_VERIFY_PLACE": "1",
+    "_note": "UNCHANGED from coldwin73/79."
+  },
+
+  "host_config": {
+    "_file": "scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py -> TransferController). The integration lane OWNS the actual run config; the key below is the ONLY one this lane adds on top of the coldwin79 (= coldwin73) block.",
+    "preplace_wrist_first": true,
+    "preplace_pan_first": true,
+    "station_pitch_hold": true,
+    "station_hold_pitch_deg": -1.17,
+    "station_hold_roll_deg": 0.0,
+    "collect_place_preplace_shape": [0.093, -1.91, 2.014, -0.103, 1.664, 0.0],
+    "carry_lift_shape": [1.2675, -2.27, 1.0, 0.65, 0.8, -1.2545],
+    "carry_wrist1_cap": 0.65,
+    "carry_wrist2_min": 0.0,
+    "preplace_budget_margin_s": 90.0,
+    "carton_level": {
+      "preplace_level_gate": true,
+      "preplace_reaction_branch": true,
+      "preplace_seeded_interior": true,
+      "preplace_branch_prefer_carry_connected": true,
+      "preplace_descent_feasible": true,
+      "preplace_max_wrist_step_rad": 0.15,
+      "preplace_soft_effort_nm": 56.0,
+      "preplace_max_segment_rad": 0.08,
+      "preplace_approach_speed": 0.05,
+      "preplace_approach_accel": 0.05,
+      "preplace_branch_select_budget_s": 8.0,
+      "preplace_above_support": true,
+      "preplace_support_clearance_m": 0.08,
+      "place_from_above": true,
+      "place_above_clearance_m": 0.08,
+      "place_depth_bias_m": 0.05,
+      "path_waypoints": 12,
+      "place_contact_release": true,
+      "place_contact_gap_m": 0.012,
+      "gravity_compensation": {"stiffness_nm_per_rad": 2850, "carton_mass_kg": 0.45},
+      "_new_key_note": "NEW this lane (coldwin80): preplace_descent_feasible (true => the carry-connected standoff selector discards any candidate whose PLACE DESCENT would exceed the 2.0 deg bound and chooses deterministically among the descent-feasible ones, so the set-down is never a lottery between runs). Default off => the greedy first-leg-2-accepted branch (byte-identical). preplace_branch_select_budget_s is KEPT at 8.0 -- the descent filter evaluates the place descent only for the leg-2-accepted candidates (~1-2 extra plan_compensated_place_descent calls on the healthy path, with an early exit once the lowest-travel feasible branch is found), well under the budget and the render-paced wall of the 5 sim-s HOST_STATUS_WATCHDOG. The place_depth_bias_m / path_waypoints / place options MUST match the place-descent gate's (they define the predicted descent the selector filters on). All other keys KEPT from coldwin79."
+    }
+  },
+
+  "runtime_config": {
+    "_file": "mission-runtime-*.json (EXTERNAL to the repo; the integration lane owns it). UNCHANGED from coldwin79.",
+    "manipulation": {
+      "stations": {
+        "chassis_station_pitch_hold": true,
+        "chassis_station_pitch_hold_pitch_deg": -1.17,
+        "chassis_station_pitch_hold_roll_deg": 0.0
+      },
+      "station_place_full_brake": true
+    }
+  },
+
+  "acceptance_coldwin80": {
+    "_lane": "sim-preplace-branch-descent-feasible-v1 -- coldwin80 = coldwin79 + preplace_descent_feasible:true. Captain's rule UNCHANGED: 2.0 deg bound / 0.15 s grace, NEVER loosened.",
+    "candidates_logged": "PREPLACE_BRANCH_CANDIDATES n=.. chosen=w2=.. descent_tilt=<=2.0 leg2_step=.. -- the console shows the ranked candidates with BOTH scores, and any low-wrist_2 branch whose descent exceeds the bound marked descent_infeasible / >bound (discarded).",
+    "no_descent_refusal": "NO CARTON_LEVEL_PLAN_REJECTED at phase=place (the chosen standoff's descent is <= 2.0 deg by construction); the place descent runs and the run ADVANCES PAST the set-down.",
+    "determinism": "Re-running the cold cycle chooses the SAME descent-feasible branch (the choice no longer flips run-to-run with the mm-scale sensed-target drift that made 76/77/78/79 a lottery).",
+    "carton_level": "CARTON_TICK world tilt peak <= 2.0 deg over both pre-place legs AND the place descent; no CARTON_TILT trip.",
+    "place": "the weld releases at true shelf/deck contact (PLACE_CONTACT_RELEASE), verify_place passes, and the run ADVANCES PAST collect.",
+    "a_b_note": "To reproduce the coldwin79 lottery set preplace_descent_feasible:false: the selector then returns the greedy first-leg-2-accepted branch, which on some sensed-target draws is the low-wrist_2 branch whose descent is refused (CARTON_LEVEL_PLAN_REJECTED ... roll 3.43 deg at phase=place -> HOST_FAULT_ESTOP)."
+  },
+
+  "_bounded_gpu_proof": "Re-run the coldwin79 collect place-on-cart capstone chain under /tmp/aile-gpu.lock (HEAVY_MB respected; whispr ~2.2 GB) with this HOST block merged (preplace_descent_feasible true on top of the coldwin79 block). Expected PASS: the PREPLACE_BRANCH_CANDIDATES line shows the chosen branch descent_tilt <= 2.0 and any infeasible low-wrist_2 branch discarded; NO CARTON_LEVEL_PLAN_REJECTED at phase=place; the place descent + contact-gated release complete and the run advances past collect, with the chosen branch stable across repeats."
+}
