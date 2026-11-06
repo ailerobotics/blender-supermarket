@@ -70,6 +70,22 @@ class CheckActivationTests(unittest.TestCase):
         self.assertEqual(len(problems), 2)
         self.assertTrue(all('MIS-PLACED' in p for p in problems))
 
+    def test_capture_silent_watchdog_suspend_key_registered_to_host(self):
+        # sim-retreat-sensor-watchdog-scope-v1: the broad capture-silent watchdog-suspend key is read by the
+        # HOST manip process (ros_host -> RosTransferBridge), so it must be registered HOST and refused in the
+        # RUNTIME config.
+        self.assertEqual(cp.KEY_CONSUMER['capture_silent_sensor_watchdog_suspend'], cp.HOST)
+        host = {'capture_silent_sensor_watchdog_suspend': True}
+        self.assertEqual(cp.check_activation(
+            host, {}, ['capture_silent_sensor_watchdog_suspend']), [])
+
+    def test_capture_silent_watchdog_suspend_key_misplaced_is_refused(self):
+        runtime = {'capture_silent_sensor_watchdog_suspend': True}
+        problems = cp.check_activation(
+            {}, runtime, ['capture_silent_sensor_watchdog_suspend'])
+        self.assertEqual(len(problems), 1)
+        self.assertIn('MIS-PLACED', problems[0])
+
 
 class MainCliTests(unittest.TestCase):
     def setUp(self):

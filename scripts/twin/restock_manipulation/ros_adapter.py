@@ -2474,7 +2474,8 @@ class RosTransferBridge:
       moving-arm protection is not weakened.
     """
     def __init__(self, node, controller, *, watchdog_seconds=1.0, startup_grace_seconds=5.0,
-                 wall_backstop_seconds=None, suspend_place_descent_watchdog=False):
+                 wall_backstop_seconds=None, suspend_place_descent_watchdog=False,
+                 suspend_capture_silent_watchdog=False):
         # fm364/run-293: the host /sensors stream wall backstop is the THIRD wall gate the fm362 audit
         # missed (effective value is this ctor default, not the module constants it widened). run-293 did
         # the FULL collect manip incl retreat_tuck, then the held-sensing /sensors stream starved past the
@@ -2536,7 +2537,16 @@ class RosTransferBridge:
         # => byte-identical. _place_watchdog_suspended latches the window so SENSOR_WATCHDOG_SUSPENDED /
         # _REARMED are each logged exactly once per entry/exit.
         self.suspend_place_descent_watchdog = bool(suspend_place_descent_watchdog)
+        # sim-retreat-sensor-watchdog-scope-v1: opt-in (HOST key capture_silent_sensor_watchdog_suspend).
+        # Broadens the PR 357 window to EVERY capture-silent phase (controller.in_capture_silent_window --
+        # the post-place retreat/stow at least, where coldwin76/77/78 each died on a watchdog counting a
+        # legitimately quiet period). Same mechanism as the place-descent suspend: only the per-frame SIM
+        # bound, never last_packet_wall, so the WALL backstop stays armed throughout. Default off =>
+        # byte-identical. _place_watchdog_suspended is the shared latch; _watchdog_suspend_reason records
+        # which window armed it so the _REARMED line names the matching exit (place_descent vs capture_silent).
+        self.suspend_capture_silent_watchdog = bool(suspend_capture_silent_watchdog)
         self._place_watchdog_suspended = False
+        self._watchdog_suspend_reason = None
         self.timer = node.create_timer(.1, self._watchdog,
                                       clock=Clock(clock_type=ClockType.STEADY_TIME))
 
@@ -2751,20 +2761,44 @@ class RosTransferBridge:
         # genuinely frozen sim is still caught inside the window. Suspended on entry to the descent,
         # re-armed the instant in_loaded_place_descent goes False (release / phase exit); never suspended
         # outside the window. Off => byte-identical.
+        #
+        # sim-retreat-sensor-watchdog-scope-v1: a SIBLING opt-in key (capture_silent_sensor_watchdog_suspend)
+        # BROADENS the window to EVERY phase where the collect capture is silent by design
+        # (controller.in_capture_silent_window -- the authoritative sensing_render_required set, adding the
+        # post-place retreat/stow and the carry swing-outs on top of the place descent). coldwin76/77/78 each
+        # completed the set-down + release then died in the empty retreat on a DIFFERENT watchdog counting a
+        # legitimately quiet period (run-78: this SIM /sensors freshness watchdog, a 0.01 s deadline miss that
+        # ran the retreat past 40 sim-s). The loaded-descent window is checked FIRST so its log + reason stay
+        # byte-identical when only the PR 357 key is on; last_packet_wall is still never touched, so the WALL
+        # backstop keeps measuring the true gap and a genuinely frozen sim is still caught inside the window.
+        suspend_reason = None
         if self.suspend_place_descent_watchdog and self.controller.in_loaded_place_descent():
+            suspend_reason = 'loaded_descent'
+        elif self.suspend_capture_silent_watchdog and self.controller.in_capture_silent_window():
+            suspend_reason = 'capture_silent'
+        if suspend_reason is not None:
             if not self._place_watchdog_suspended:
                 self._place_watchdog_suspended = True
-                print('SENSOR_WATCHDOG_SUSPENDED phase=%s reason=loaded_descent (per-frame /sensors sim '
-                      'bound suspended for the loaded place descent; %.0fs wall backstop still armed)'
-                      % (self.controller.phase, self.wall_backstop_seconds), flush=True)
+                self._watchdog_suspend_reason = suspend_reason
+                detail = ('the loaded place descent' if suspend_reason == 'loaded_descent'
+                          else 'a capture-silent phase (/sensors emits nothing by design)')
+                print('SENSOR_WATCHDOG_SUSPENDED phase=%s reason=%s (per-frame /sensors sim bound suspended '
+                      'for %s; %.0fs wall backstop still armed)'
+                      % (self.controller.phase, suspend_reason, detail, self.wall_backstop_seconds),
+                      flush=True)
             # Keep ONLY the per-frame SIM anchor fresh (so the bound below cannot trip and the resume is
             # clean); leave last_packet_wall untouched so the wall backstop keeps measuring the true gap.
             if self.last_packet_sim is not None:
                 self.last_packet_sim = self.node.get_clock().now().nanoseconds * 1e-9
         elif self._place_watchdog_suspended:
             self._place_watchdog_suspended = False
-            print('SENSOR_WATCHDOG_REARMED phase=%s reason=place_descent_exit (per-frame /sensors sim '
-                  'bound re-armed)' % (self.controller.phase,), flush=True)
+            # Name the matching exit: PR 357's loaded-descent window re-arms as place_descent_exit
+            # (byte-identical to its log); the broad capture-silent window re-arms as capture_silent_exit.
+            exit_reason = ('place_descent_exit' if self._watchdog_suspend_reason == 'loaded_descent'
+                           else 'capture_silent_exit')
+            self._watchdog_suspend_reason = None
+            print('SENSOR_WATCHDOG_REARMED phase=%s reason=%s (per-frame /sensors sim bound re-armed)'
+                  % (self.controller.phase, exit_reason), flush=True)
         # Per-frame bound in NODE-CLOCK (sim) time: on real hardware sim == wall so the 1 s
         # semantics are unchanged, and under a render-paced /clock it does not false-trip on the
         # 1.7-3.5 s wall gap between captures (the sim clock barely advances across a render tick).
