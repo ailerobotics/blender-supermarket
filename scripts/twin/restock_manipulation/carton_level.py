@@ -340,15 +340,44 @@ def place_descent_drop_m(robot, waypoints, *, tool_link='ur_tool0', root='ur_bas
 
 
 def place_contact_release_z(start_carton_z, drop_m, gap_m):
-    """The measured carton-centre z (ur_base_link) at which the contact-triggered weld release should fire:
-    ``start_carton_z - drop_m + gap_m``. ``start_carton_z`` is the live carton centre z when the place
-    descent is issued (carton at the standoff), ``drop_m`` the planned descent drop (:func:`place_descent_drop_m`),
-    ``gap_m`` the carton-bottom-to-deck gap at which to release (a few mm above hard contact). The carton has
-    descended to within ``gap_m`` of its set-down pose -- i.e. its bottom is ~``gap_m`` above the deck -- when
-    its live centre z has fallen to this value. Pure/CPU; the caller fires once ``live_z <= this``."""
+    """The carton-BOTTOM-frame contact-release height: ``start_carton_z - drop_m + gap_m``. ``start_carton_z``
+    is the live carton centre z when the place descent is issued (carton at the standoff), ``drop_m`` the
+    planned descent drop (:func:`place_descent_drop_m`) EXPRESSED AS A DROP TO THE CARTON-BOTTOM-AT-SUPPORT
+    set-down, and ``gap_m`` the carton-bottom-to-support gap at which to release. Pure/CPU.
+
+    WARNING (sim-release-threshold-carton-frame-v1): the production place descent waypoints target the carton
+    REFERENCE (centre) at the support top rather than the carton BOTTOM at the support top, so the measured
+    ``place_descent_drop_m`` drop is one carton HALF-height larger than a drop-to-bottom-at-support, and this
+    value then lands one half-height BELOW the measured carton CENTRE (``Sensors.placed_pose[2]``). The
+    controller must compare the measured carton CENTRE against :func:`place_contact_release_z_centre`, which
+    adds the carton half-height so the trigger fires at true contact. This bottom-frame helper is retained for
+    the deck set-down geometry tests (``test_place_support_z`` passes a drop already reduced to the
+    carton-bottom-at-support set-down, where no half-height correction is wanted)."""
     if not all(math.isfinite(v) for v in (start_carton_z, drop_m, gap_m)):
         raise ValueError('place_contact_release_z needs finite start_carton_z, drop_m, gap_m')
     return float(start_carton_z) - float(drop_m) + float(gap_m)
+
+
+def place_contact_release_z_centre(start_carton_z, drop_m, gap_m, carton_height_m):
+    """sim-release-threshold-carton-frame-v1: the carton-CENTRE z (ur_base_link) at which the contact-triggered
+    weld release should fire, in the SAME frame as the measured carton pose. ``Sensors.placed_pose`` is the
+    carton CENTRE (see ``types.py``), so the geometric release threshold must be expressed in the carton-centre
+    frame too: ``place_contact_release_z(start, drop, gap) + carton_height_m / 2``.
+
+    WHY (coldwin87): ``PLACE_CONTACT_RELEASE_ARM phase=place start_carton_z=0.6422 descent_drop=0.0907
+    gap=0.0120 -> release at carton_z<=0.5635``. The welded carton rested on the shelf at carton centre
+    ~0.6422 (the ``PLACE_RELEASE_TICK`` plateau), which is ``half - gap`` = ``0.09 - 0.012`` = ``0.078`` m
+    ABOVE the 0.5635 threshold -- the legacy bottom-frame threshold compared the carton BOTTOM height against
+    the carton CENTRE. With PR 373's startup-stall suppression on, the stall trigger could not fire either, so
+    the stiff place drive pressed the welded carton into the shelf to ``PATH_TOLERANCE_VIOLATED`` ->
+    ``HOST_FAULT_ESTOP``. Adding the carton half-height makes the geometric trigger fire when the carton BOTTOM
+    reaches ``support_top + gap`` (carton CENTRE at ``support_top + half + gap``) -- the SAME true-contact
+    height the descent-stall trigger detects: cw87 -> ``0.6422 - 0.0907 + 0.18/2 + 0.012 = 0.6535``, i.e. at
+    the measured rest instead of 0.078 m below it. Pure/CPU; the caller fires once ``live_carton_centre_z <=
+    this``."""
+    if not (math.isfinite(float(carton_height_m)) and float(carton_height_m) >= 0):
+        raise ValueError('place_contact_release_z_centre needs a finite non-negative carton_height_m')
+    return place_contact_release_z(start_carton_z, drop_m, gap_m) + float(carton_height_m) / 2.0
 
 
 def _as_joint_map(config):
@@ -753,6 +782,26 @@ class LevelConfig:
     release_reissue: bool = False
     release_confirm_timeout_s: float = 8.0         # sim seconds: bounded window for the release to confirm
     release_reissue_log_every: int = 30            # emit one RELEASE_REISSUE line per this many ticks
+    # sim-release-threshold-carton-frame-v1 (coldwin85/coldwin86 fell to the floor after release): after the
+    # weld detach, PROVE the carton is FREE of the gripper and RESTING before retreating, then clear the
+    # gripper straight up before any lateral / pan retreat motion. coldwin85 and coldwin86 released the weld
+    # at the set-down and the retreat's first (near-horizontal) motion swept the barely-rested carton off the
+    # shelf (verify: carton not resting on deck, cw85 bottom_gap=-0.954, cw86 -0.815); coldwin83 on the same
+    # config happened to rest. With ``release_free_check`` on, ``release_free.ReleaseFreeGate`` HOLDs (no
+    # retreat motion) until the measured carton CENTRE z is stable and the carton BOTTOM is resting
+    # (``|bottom_gap| <= release_free_rest_gap_m``) for ``release_free_settle_ticks`` consecutive ticks, THEN
+    # raises the gripper straight up by ``release_free_lift_dz_m`` and verifies the carton did NOT follow (rose
+    # less than ``release_free_follow_frac`` of the lift); it FAILS BY NAME (``RELEASE_NOT_FREE``) when the
+    # carton never rests within ``release_free_settle_window_ticks`` or follows the gripper up. Needs a
+    # measured ``placed_pose`` (RESTOCK_VERIFY_PLACE); absent => the gate is skipped (real rig). Default off =>
+    # the detach transitions straight to retreat => byte-identical.
+    release_free_check: bool = False
+    release_free_settle_ticks: int = 5             # consecutive stable+resting ticks before the clearance lift
+    release_free_stable_eps_m: float = 0.005       # max carton-centre-z change per tick that counts as stable
+    release_free_rest_gap_m: float = 0.03          # |carton bottom - support top| that counts as resting
+    release_free_settle_window_ticks: int = 60     # bounded hold before refusing RELEASE_NOT_FREE (not at rest)
+    release_free_lift_dz_m: float = 0.06           # pure vertical clearance lift before the lateral retreat
+    release_free_follow_frac: float = 0.5          # carton rose >= this fraction of the lift => followed => refuse
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -835,6 +884,23 @@ class LevelConfig:
                 or self.release_reissue_log_every < 1:
             raise ValueError('carton_level.release_reissue_log_every must be a positive integer '
                              '(RELEASE_REISSUE is logged once per this many ticks)')
+        # sim-release-threshold-carton-frame-v1
+        for nm, v in (('release_free_stable_eps_m', self.release_free_stable_eps_m),
+                      ('release_free_rest_gap_m', self.release_free_rest_gap_m),
+                      ('release_free_lift_dz_m', self.release_free_lift_dz_m)):
+            if not (math.isfinite(float(v)) and float(v) > 0):
+                raise ValueError(f'carton_level.{nm} must be a finite positive number of metres')
+        if not (math.isfinite(float(self.release_free_follow_frac))
+                and 0 < float(self.release_free_follow_frac) <= 1.0):
+            raise ValueError('carton_level.release_free_follow_frac must be a finite number in (0, 1] '
+                             '(carton rose >= this fraction of the clearance lift => followed the gripper)')
+        for nm, v in (('release_free_settle_ticks', self.release_free_settle_ticks),
+                      ('release_free_settle_window_ticks', self.release_free_settle_window_ticks)):
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ValueError(f'carton_level.{nm} must be a positive integer')
+        if self.release_free_settle_window_ticks < self.release_free_settle_ticks:
+            raise ValueError('carton_level.release_free_settle_window_ticks must be >= '
+                             'release_free_settle_ticks (the bounded hold must allow the settle streak)')
         if (isinstance(self.place_support_tokens, str) or not hasattr(self.place_support_tokens, '__iter__')
                 or not tuple(self.place_support_tokens)
                 or not all(isinstance(t, str) and t for t in self.place_support_tokens)):
@@ -930,16 +996,20 @@ def resolve_level_config(spec):
                  'preplace_above_support', 'preplace_level_gate', 'preplace_reaction_branch',
                  'preplace_seeded_interior', 'preplace_branch_prefer_carry_connected',
                  'preplace_descent_feasible',
-                 'place_release_on_contact', 'release_cancel_handshake', 'release_reissue'):
+                 'place_release_on_contact', 'release_cancel_handshake', 'release_reissue',
+                 'release_free_check'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     # sim-place-release-on-contact-v1 / sim-place-release-cancel-handshake-v1 / sim-release-open-reissue-v1
     for fnum in ('place_release_effort_margin_nm', 'place_release_stall_m', 'place_obstruction_gap_mm',
-                 'place_reapproach_shift_m', 'release_cancel_stopped_vel', 'release_confirm_timeout_s'):
+                 'place_reapproach_shift_m', 'release_cancel_stopped_vel', 'release_confirm_timeout_s',
+                 'release_free_stable_eps_m', 'release_free_rest_gap_m', 'release_free_lift_dz_m',
+                 'release_free_follow_frac'):
         if spec.get(fnum) is not None:
             kw[fnum] = float(spec[fnum])
     for fint in ('place_release_effort_consecutive', 'place_release_stall_ticks', 'place_reapproach_max',
-                 'release_cancel_stopped_ticks', 'release_reissue_log_every'):
+                 'release_cancel_stopped_ticks', 'release_reissue_log_every',
+                 'release_free_settle_ticks', 'release_free_settle_window_ticks'):
         if spec.get(fint) is not None:
             kw[fint] = int(spec[fint])
     if spec.get('place_release_contact_gap_mm') is not None:
