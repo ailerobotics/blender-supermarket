@@ -15,6 +15,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from twin.restock_manipulation.ros_adapter import RosTransferBridge
+from twin.restock_manipulation.isaac_sensors import sensing_render_required
 
 
 class NS:
@@ -41,14 +42,18 @@ def _bridge(*, phase='observe', first_frame=False, job_age=None, job_sim_age=Non
             packet_wall_age=0.1, sim_gap=0.0, wall_backstop=30.0,
             startup_grace_sim=5.0, startup_grace_wall_backstop=250.0,
             transit_pause_wall=1200.0, transit_start_age=None,
-            suspend_place_descent_watchdog=False, held=False):
+            suspend_place_descent_watchdog=False, held=False,
+            suspend_capture_silent_watchdog=False):
     b = RosTransferBridge.__new__(RosTransferBridge)
     b.watchdog_seconds = 1.0
     b.startup_grace_seconds = 5.0
     # sim-place-descent-watchdog-suspend-v1: phase-scoped per-frame SIM-bound suspension over the loaded
     # place descent (off by default => byte-identical).
     b.suspend_place_descent_watchdog = suspend_place_descent_watchdog
+    # sim-retreat-sensor-watchdog-scope-v1: broad capture-silent suspension (off by default => byte-identical).
+    b.suspend_capture_silent_watchdog = suspend_capture_silent_watchdog
     b._place_watchdog_suspended = False
+    b._watchdog_suspend_reason = None
     # sim-robust-host-timers-audit-fix-v1: SIM-primary startup grace + generous frozen-sim wall backstop.
     b.startup_grace_sim_seconds = startup_grace_sim
     b.startup_grace_wall_backstop_s = startup_grace_wall_backstop
@@ -71,7 +76,10 @@ def _bridge(*, phase='observe', first_frame=False, job_age=None, job_sim_age=Non
     b._emit = lambda result: emitted.append(result)
     b.controller = NS(phase=phase, _fail=lambda reason: NS(reason=reason, controls=()),
                       retry_or_fail_move=lambda reason: NS(reason=reason, controls=()),
-                      in_loaded_place_descent=lambda: phase == 'place' and bool(held))
+                      in_loaded_place_descent=lambda: phase == 'place' and bool(held),
+                      # sim-retreat-sensor-watchdog-scope-v1: the authoritative capture-silent predicate,
+                      # driven by the SAME sensing_render_required set the production controller delegates to.
+                      in_capture_silent_window=lambda: not sensing_render_required(b.controller.phase))
     return b, emitted
 
 
@@ -302,6 +310,118 @@ class PlaceDescentSensorWatchdogSuspend(unittest.TestCase):
         b._watchdog()
         self.assertEqual(emitted, [])
         self.assertFalse(b._place_watchdog_suspended)
+
+
+class CaptureSilentSensorWatchdogScope(unittest.TestCase):
+    # sim-retreat-sensor-watchdog-scope-v1 (coldwin76/77/78): the runs completed the loaded set-down AND the
+    # contact-triggered release on the cart, then each died in the EMPTY RETREAT on a different watchdog
+    # counting a legitimately quiet period. run-78's was THIS per-frame /sensors SIM freshness watchdog: the
+    # phase-aware collect capture does not fire in retreat/stow by design, a 0.01 s move-deadline miss drove a
+    # retry, the retreat ran past 40 sim-s, and the SIM bound expired (HOST_FAULT 'sensor stream watchdog
+    # expired', phase=retreat) against RESTOCK_SENSOR_WATCHDOG_S=40. The broad opt-in key suspends the SIM
+    # bound over EVERY capture-silent phase (controller.in_capture_silent_window); the WALL backstop stays
+    # armed so a frozen sim is still caught. Key off => the legacy behaviour (byte-identical).
+
+    def _capture(self, b):
+        import contextlib, io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            b._watchdog()
+        return buf.getvalue()
+
+    def test_retreat_sim_stall_does_not_trip_when_enabled(self):
+        # The exact run-78 condition: a 40 s SIM gap in phase=retreat against a 40 s SIM bound, with a
+        # deadline-retry-driven slow retreat. Suspended (capture-silent) => no fail.
+        b, emitted = _bridge(phase='retreat', first_frame=True, sim_gap=40.1,
+                             packet_wall_age=0.1, suspend_capture_silent_watchdog=True)
+        b.watchdog_seconds = 40.0
+        out = self._capture(b)
+        self.assertEqual(emitted, [])
+        self.assertTrue(b._place_watchdog_suspended)
+        self.assertIn('SENSOR_WATCHDOG_SUSPENDED phase=retreat reason=capture_silent', out)
+        # anchor refreshed to 'now' so the resume after the window is clean
+        self.assertIsNotNone(b.last_packet_sim)
+        self.assertLessEqual(SIM_NOW - b.last_packet_sim, 1e-6)
+
+    def test_same_retreat_stall_trips_when_key_off(self):
+        # Key off (default): the IDENTICAL retreat SIM gap still trips -> proves the known run-78 fault with
+        # the key off (byte-identical legacy behaviour).
+        b, emitted = _bridge(phase='retreat', first_frame=True, sim_gap=40.1,
+                             packet_wall_age=0.1, suspend_capture_silent_watchdog=False)
+        b.watchdog_seconds = 40.0
+        b._watchdog()
+        self.assertEqual([e.reason for e in emitted], ['sensor stream watchdog expired'])
+        self.assertFalse(b._place_watchdog_suspended)
+
+    def test_stow_sim_stall_does_not_trip_when_enabled(self):
+        # stow is capture-silent too (post-place arm return): a long SIM gap there must not trip when on.
+        b, emitted = _bridge(phase='stow', first_frame=True, sim_gap=30.0,
+                             packet_wall_age=0.1, suspend_capture_silent_watchdog=True)
+        out = self._capture(b)
+        self.assertEqual(emitted, [])
+        self.assertTrue(b._place_watchdog_suspended)
+        self.assertIn('SENSOR_WATCHDOG_SUSPENDED phase=stow reason=capture_silent', out)
+
+    def test_wall_backstop_still_fires_in_retreat_while_suspended(self):
+        # A genuinely FROZEN sim inside the retreat window: the SIM bound is suspended but the WALL backstop
+        # must still hard-stop it (last_packet_wall is never touched by the suspend).
+        b, emitted = _bridge(phase='retreat', first_frame=True, sim_gap=30.0,
+                             packet_wall_age=601.0, wall_backstop=600.0,
+                             suspend_capture_silent_watchdog=True)
+        b._watchdog()
+        self.assertEqual(len(emitted), 1)
+        self.assertTrue(emitted[0].reason.startswith('sensor stream wall backstop expired'), emitted[0].reason)
+        self.assertIn('gap=601.0s > 600.0s', emitted[0].reason)
+
+    def test_not_suspended_in_a_capture_bearing_phase_even_when_enabled(self):
+        # observe is a capture-BEARING phase (sensing_render_required True): the SIM bound stays live and a
+        # real stall there still trips. The broad suspension never applies outside the capture-silent set.
+        self.assertTrue(sensing_render_required('observe'))
+        b, emitted = _bridge(phase='observe', first_frame=True, sim_gap=2.0,
+                             packet_wall_age=0.1, suspend_capture_silent_watchdog=True)
+        b._watchdog()
+        self.assertEqual([e.reason for e in emitted], ['sensor stream watchdog expired'])
+        self.assertFalse(b._place_watchdog_suspended)
+
+    def test_rearms_on_entering_a_capture_bearing_phase(self):
+        # Suspend over a retreat tick, then step into a capture-bearing phase (verify): the latch clears
+        # (REARMED named capture_silent_exit) so a following stall is measured normally again.
+        b, emitted = _bridge(phase='retreat', first_frame=True, sim_gap=30.0,
+                             packet_wall_age=0.1, suspend_capture_silent_watchdog=True)
+        self._capture(b)
+        self.assertTrue(b._place_watchdog_suspended)
+        b.controller.phase = 'verify'   # capture-bearing: re-validation renders a fresh frame
+        b.last_packet_sim = SIM_NOW - 0.05
+        out = self._capture(b)
+        self.assertEqual(emitted, [])
+        self.assertFalse(b._place_watchdog_suspended)
+        self.assertIn('SENSOR_WATCHDOG_REARMED phase=verify reason=capture_silent_exit', out)
+
+    def test_broad_key_off_keeps_retreat_live(self):
+        # Broad key OFF (only the PR 357 place-descent key semantics apply): a retreat stall still trips --
+        # the loaded-descent window never covers retreat. Proves the two keys are independent.
+        b, emitted = _bridge(phase='retreat', first_frame=True, sim_gap=2.0,
+                             packet_wall_age=0.1, suspend_place_descent_watchdog=True,
+                             suspend_capture_silent_watchdog=False)
+        b._watchdog()
+        self.assertEqual([e.reason for e in emitted], ['sensor stream watchdog expired'])
+
+    def test_loaded_descent_reason_preserved_when_both_keys_on(self):
+        # Both keys on in the loaded place descent (place + held): the place-descent window is checked FIRST,
+        # so the log/reason stay loaded_descent (PR 357 byte-identical) and the re-arm is place_descent_exit.
+        b, emitted = _bridge(phase='place', held=True, first_frame=True, sim_gap=30.0,
+                             packet_wall_age=0.1, suspend_place_descent_watchdog=True,
+                             suspend_capture_silent_watchdog=True)
+        out = self._capture(b)
+        self.assertEqual(emitted, [])
+        self.assertIn('reason=loaded_descent', out)
+        self.assertEqual(b._watchdog_suspend_reason, 'loaded_descent')
+        # leave the window into a capture-bearing phase: re-arm names the PR 357 exit string
+        b.controller.phase = 'verify'
+        b.controller.in_loaded_place_descent = lambda: False
+        b.last_packet_sim = SIM_NOW - 0.05
+        out2 = self._capture(b)
+        self.assertIn('SENSOR_WATCHDOG_REARMED phase=verify reason=place_descent_exit', out2)
 
 
 if __name__ == '__main__':

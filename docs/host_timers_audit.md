@@ -203,6 +203,43 @@ the frozen-sim WALL backstop still tripping while suspended, key-off still tripp
 `test_restock_runtime.py` (`test_collect_place_pauses_the_parked_station_once_when_enabled` /
 `_off_never_suspend_pauses`), `test_config_preflight.py` (both keys registered + mis-placement refused).
 
+### `/sensors` watchdog scope broadened to all capture-silent phases (sim-retreat-sensor-watchdog-scope-v1)
+
+coldwin76, 77 and 78 all completed the loaded set-down **and** the contact-triggered release on the cart,
+then each died in the **empty retreat** on a *different* watchdog counting a legitimately quiet period
+(run-76 on the 180 s wall backstop variant, run-77 on the nav-stuck wall watchdog — fixed by
+`RESTOCK_NAV_STUCK_SIM_S=120`, run-78 on this per-frame `/sensors` SIM freshness watchdog). Run-78: the
+phase-aware collect capture does not fire in `retreat`/`stow` by design, a 0.01 s `MOVE_DEADLINE_RETRY
+phase=retreat` drove a retry, the retreat ran past 40 sim-s, and the SIM bound expired against
+`RESTOCK_SENSOR_WATCHDOG_S=40` (`HOST_FAULT 'sensor stream watchdog expired'`) → collect `StageRetry`.
+
+PR 357 suspended that SIM bound only for the loaded place descent (`in_loaded_place_descent`). The root
+generalisation: the `/sensors` stream is silent by design in **every** phase where
+`sensing_render_required(phase)` is False (`isaac_sensors._SENSING_SUSPEND_PHASES`: the validated-reach
+execution phases approach/contact/grasp/lift/preplace/place/retreat/release/stow/couple and the carry
+swing-outs tuck/pan/retreat_tuck), so the per-frame SIM bound must be suspended across that whole set, not
+just the place descent.
+
+- **HOST key `capture_silent_sensor_watchdog_suspend`** (`ros_host.py` → `RosTransferBridge`): sibling of
+  `place_descent_sensor_watchdog_suspend`, broadening the suspension to `controller.in_capture_silent_window()`
+  (`not sensing_render_required(phase)` — the authoritative single-source capture-silent set; the post-place
+  `retreat`/`stow` at least). Identical mechanism: only the per-frame SIM anchor is kept fresh,
+  `last_packet_wall` is **never** touched, so the `SENSOR_STREAM_WALL_BACKSTOP_S` wall backstop (600 s in
+  cw77+) stays armed throughout and a genuinely frozen sim is still caught inside the window. Logs
+  `SENSOR_WATCHDOG_SUSPENDED phase=retreat reason=capture_silent …` on entry and `SENSOR_WATCHDOG_REARMED
+  phase=<capture-bearing> reason=capture_silent_exit …` on re-entry to a capture-bearing phase (observe /
+  verify re-validation). The loaded-descent window is checked first, so with only the PR 357 key on the log +
+  reason stay `loaded_descent` / `place_descent_exit` (byte-identical). Default off ⇒ byte-identical;
+  registered HOST in `config_preflight.KEY_CONSUMER` (refused if filed in the RUNTIME config).
+
+With this key on, the standing tight `RESTOCK_SENSOR_WATCHDOG_S=40` (sim) can come back (cw79 widened it
+further as a whole-run stopgap). Recommended ON values + bounded-GPU proof:
+[`docs/examples/retreat-sensor-watchdog-scope-fragment.json`](examples/retreat-sensor-watchdog-scope-fragment.json).
+CPU proof: `test_ros_adapter_watchdog.py` (`CaptureSilentSensorWatchdogScope` — suspend over retreat/stow,
+the cw78 40-sim-s replay with no fault on / the known fault off, the wall backstop still tripping while
+suspended, re-arm into a capture-bearing phase, independence from the PR 357 key, loaded-descent reason
+preserved when both keys on), `test_config_preflight.py` (`test_capture_silent_watchdog_suspend_key_*`).
+
 ## Timer table
 
 Legend — **clock**: `SIM` (node/sim clock, pace-safe), `WALL` (monotonic), `SIM+WALL` (sim primary +
@@ -219,9 +256,10 @@ earlier), `converted` (this lane), `wall-backstop` (kept wall by design — boun
 | inline total-cap in `_poll` plan_result | same budget at the re-plan fail-fast | **SIM**+WALL | **converted** (now calls `planning_wall_exceeded()`) |
 | `PLAN_SIM_DEADLINE_S` (env, default 30) | per-dispatch ik/plan_accept/plan_result deadline (`_arm_plan_deadline`) | SIM | sim-clocked (PR 228) |
 | `sim_execute_budget` / `EXECUTE_SETTLE_MARGIN_S` / `MOVE_SIM_DEADLINE_SCALE` | per-trajectory execution deadline | SIM | sim-clocked |
-| `SENSOR_WATCHDOG_S` (env, default 1) | per-frame /sensors freshness | SIM | sim-clocked; paired with the wall backstop below. **Phase-scoped suspend** over the loaded place descent — see note below |
+| `SENSOR_WATCHDOG_S` (env, default 1) | per-frame /sensors freshness | SIM | sim-clocked; paired with the wall backstop below. **Phase-scoped suspend** over the loaded place descent AND (sim-retreat-sensor-watchdog-scope-v1) over every capture-silent phase — see notes below |
 | `SENSOR_STREAM_WALL_BACKSTOP_S` (env, default 30) | /sensors frozen-sim backstop | WALL (backstop) | wall-backstop (frozen sim can't advance the SIM per-frame bound); **stays armed even while the per-frame bound is place-descent-suspended** |
 | `place_descent_sensor_watchdog_suspend` (HOST key, default off) | suspend the per-frame `SENSOR_WATCHDOG_S` bound ONLY while `controller.in_loaded_place_descent()` (phase `place`, carton held) | SIM (suspend) | sim-robust-place-descent-watchdog-suspend-v1 — see note below |
+| `capture_silent_sensor_watchdog_suspend` (HOST key, default off) | suspend the per-frame `SENSOR_WATCHDOG_S` bound over every capture-silent phase (`controller.in_capture_silent_window()` = `not sensing_render_required(phase)`; retreat/stow at least). Wall backstop stays armed | SIM (suspend) | sim-retreat-sensor-watchdog-scope-v1 — see note below |
 | `STARTUP_GRACE_SIM_S` (env `RESTOCK_STARTUP_GRACE_SIM_S`, default 5) | first-frame "no initial sensor frame" grace | **SIM**+WALL | **converted**; `startup_grace_wall_backstop_s` derived generous |
 | `STARTUP_GRACE_S` (env `RESTOCK_STARTUP_GRACE_S`, default 5) | wall floor feeding the startup backstop (kept for back-compat) | WALL (backstop) | **converted** (role → backstop floor) |
 | `MOVE_WALL_TIMEOUT_S` / `self.timeout` (env, default 25) | legacy per-dispatch wall deadline; now used only to hold the deadline AHEAD during a respawn wait | WALL | sim-clocked for active waits (superseded by `PLAN_SIM_DEADLINE_S`); residual use bounded by `RESPAWN_WAIT_CAP_S` |
