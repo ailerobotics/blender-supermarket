@@ -701,6 +701,15 @@ class LevelConfig:
     place_release_effort_consecutive: int = 3
     place_release_stall_m: float = 0.001
     place_release_stall_ticks: int = 5
+    # sim-place-verify-rest-tolerance-v1: gate the STALL release trigger on the carton being near the
+    # planned set-down height. None (default) => the stall trigger is unchanged (byte-identical). A finite
+    # positive margin (metres) makes a descent stall count as 'support met' ONLY when the carton centre z
+    # is within ``release_z + this`` -- so the render-paced STARTUP stall (carton_z frozen at the standoff
+    # before the descent trajectory moves) no longer fires the release ~0.06 m above the shelf. coldwin83
+    # and coldwin85 BOTH released on that startup stall at the standoff height, leaving the carton cradled
+    # above the shelf; cw83's slipped free and rested (verify passed) while cw85's was carried off by the
+    # retreat and fell to the floor (verify: carton not resting on deck, xy=1.219 bottom_gap=-0.954).
+    place_release_stall_height_margin_m: object = None
     place_release_contact_gap_mm: object = None   # None => the seal-gap contact trigger is off
     place_support_tokens: tuple = ('shelf', 'deck')
     place_obstruction_gap_mm: float = 2.0
@@ -810,6 +819,13 @@ class LevelConfig:
                 and float(self.place_release_contact_gap_mm) > 0):
             raise ValueError('carton_level.place_release_contact_gap_mm must be None or a finite positive '
                              'number of millimetres (the support-contact seal-gap release trigger)')
+        # sim-place-verify-rest-tolerance-v1
+        if self.place_release_stall_height_margin_m is not None and not (
+                math.isfinite(float(self.place_release_stall_height_margin_m))
+                and float(self.place_release_stall_height_margin_m) > 0):
+            raise ValueError('carton_level.place_release_stall_height_margin_m must be None or a finite '
+                             'positive number of metres (the stall release trigger only counts within '
+                             'release_z + this of the planned set-down height)')
         # sim-release-open-reissue-v1
         if not (math.isfinite(float(self.release_confirm_timeout_s)) and float(self.release_confirm_timeout_s) > 0):
             raise ValueError('carton_level.release_confirm_timeout_s must be a finite positive number of '
@@ -928,6 +944,9 @@ def resolve_level_config(spec):
             kw[fint] = int(spec[fint])
     if spec.get('place_release_contact_gap_mm') is not None:
         kw['place_release_contact_gap_mm'] = float(spec['place_release_contact_gap_mm'])
+    # sim-place-verify-rest-tolerance-v1 (nullable metres; absent => None => stall trigger unchanged)
+    if spec.get('place_release_stall_height_margin_m') is not None:
+        kw['place_release_stall_height_margin_m'] = float(spec['place_release_stall_height_margin_m'])
     if 'place_support_tokens' in spec and spec['place_support_tokens'] is not None:
         _pst = spec['place_support_tokens']
         # Pass the value through (even a malformed one) so validate() rejects a string / empty / non-list

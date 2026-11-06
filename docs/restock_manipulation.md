@@ -611,6 +611,38 @@ gripper-open feedback when a fresh status is present. Recommended ON values + ac
 re-issue/confirm/timeout branches, OFF byte-identical, and coldwin84 (hang OFF, confirmed ON) / coldwin83
 (single-shot success still confirms) replays): `scripts/twin/tests/test_release_open_reissue_v1.py`.
 
+### Releasing at the TRUE set-down, not the render-paced startup stall (sim-place-verify-rest-tolerance-v1)
+
+The contact-gated release's **stall** trigger (above) fired on the **descent START** height in coldwin85
+and coldwin83, ~0.06 m **above** the planned set-down, leaving the carton cradled above the shelf — and
+the collect **place verify** (`controller.py` `verify` phase, `sensors.placed_pose` vs `target_surface`:
+`carton not resting on deck (xy bottom_gap)`) then caught the consequence. coldwin85 was an **exact re-run**
+of coldwin83: both set the carton down and released it, but coldwin85's verify failed `xy=1.219
+bottom_gap=-0.954` (the carton came to rest ~1 m below the shelf, **on the floor**) while coldwin83 passed
+the same check. nav-trace (`RESTOCK_TRACE_POSES`) shows the cart and base **did not move** in either run —
+the verify frame is correct; the carton genuinely left the shelf. The differentiator is the release pose:
+both `PLACE_RELEASE_TICK` traces have the measured carton centre z **frozen** at the standoff (cw85 0.6251,
+cw83 0.6256) for the first few render-paced ticks because the descent trajectory had not produced motion
+yet, so the "no downward progress for `place_release_stall_ticks`" rule read that **startup** freeze as
+"support met" and released the weld at carton_z 0.625 while the planned set-down (`PLACE_CONTACT_RELEASE_ARM`
+`release at carton_z<=…`) was 0.5628/0.5635 — **0.062 m lower**. Released high and still cradled in the side
+grip, whether the carton slips free onto the shelf (cw83: dropped 0.125 m, settled world z=1.022, stable
+through verify) or stays perched and is carried off by the retreat fold (cw85: rode up to world z=1.77 as the
+arm folded, then fell to the floor at z=0.08) is a coin flip — the rest is **non-deterministic**.
+
+The fix (HOST `carton_level.place_release_stall_height_margin_m`, opt-in, **default None ⇒ byte-identical**):
+a descent **stall only counts as "support met" when the carton centre z is within `release_z + margin`** of
+the planned set-down. A stall still above that is the render-paced **startup** stall and is **suppressed** —
+the gate keeps pressing, the descent reaches the true set-down, and the weld releases on the **z / effort /
+support-contact** trigger at the height where the carton actually rests on the shelf, so the rest is
+deterministic in both runs. It is **inert when `release_z` is None** (no reference height), and a genuine
+stall *inside* the window (real support contact) still fires. This does **not** touch the 2.0° carton tilt
+bound and does **not** change the verify: it makes the carton actually rest on the support (the verify stays
+the honest `carton not resting on deck` gate, never loosened). Recommended ON value + acceptance:
+`docs/examples/place-verify-rest-fragment.json`; CPU proof (the startup-stall suppression, the release at the
+true set-down, a real near-set-down stall still firing, OFF byte-identical, and the coldwin85/coldwin83
+replays): `scripts/twin/tests/test_place_verify_rest_tolerance_v1.py`.
+
 ## Place-on-cart between-posts target (sim-place-target-between-posts-v1)
 
 The collect place-on-cart load-centre on the rollwagen **upper shelf** is moved from the old
