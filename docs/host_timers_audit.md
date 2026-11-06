@@ -72,6 +72,35 @@ changed. On the real rig (sim == wall) the SIM leg fires first, so the wall valu
 path is byte-identical. CPU proof extends `host_pacing_harness.py` / `test_host_timers_pacing.py` to the real
 `IncorporationAckState.snapshot` at 1×/16×/30× (`simulate_station_heartbeat`).
 
+**Capture-silent scope (sim-retreat-station-heartbeat-scope-v1).** The SIM-primary budget above is the right
+*clock*, but it still counts the **capture-silent retreat/stow window**, where the mission executes a long,
+silent arm leg and sends the parked station no heartbeat by design. coldwin81 cleared the loaded place +
+contact release and PR 369's scoped `/sensors` sensor watchdog held through the empty retreat, but the run
+died on the **last** watchdog counting that window: `[python3-6] STATION_ESTOP_PUBLISH site=tick
+reason="parked heartbeat lost: sim gap 60.02 s"` → latched global `/manipulation/stop` → a collect
+`StageRetry` loop that cannot succeed. The retreat ran **~98 sim-s** — its first trajectory segment is
+time-parameterized to ~100.67 sim-s (`TRAJ_HOST_PLAN` right after `RELEASE_CANCEL_STOPPED_FALLBACK`, points
+jump `(0.0,…)→(100.6721,…)`), unwinding `ur_wrist_2` ~1.33 rad + `ur_shoulder_pan` ~0.41 rad at ~0.013 rad/s;
+NOT retry churn (one 0.01 s `MOVE_DEADLINE_RETRY phase=retreat`), and the same shape is in cw76/77/78
+(first segment 77–100 sim-s). The opt-in **HOST** key `capture_silent_station_heartbeat_suspend` suspends
+**only the SIM leg** of `IncorporationAckState.snapshot` over every capture-silent phase (the authoritative
+`restock_manipulation.capture_phases.sensing_render_required` set, the single-source leaf re-exported from
+`isaac_sensors`), re-armed on the next capture-bearing phase (observe / verify), with named
+`STATION_HEARTBEAT_SUSPENDED` / `STATION_HEARTBEAT_REARMED` lines. The SIM anchor (`last_heartbeat`) is kept
+fresh so the resume sees no stale gap; `wall_heartbeat` is never touched, so the **derived frozen-sim WALL
+backstop stays armed** and a genuinely frozen sim inside the window is still caught by name (`parked
+heartbeat lost: wall gap <g> s (capture-silent frozen-sim backstop)`), as is a station process death. The
+station node (`incorporation_ack`) is a separate process reading env, so `restock_host.launch` translates
+the committed HOST-config key into `RESTOCK_STATION_HEARTBEAT_CAPTURE_SILENT_SUSPEND`. This is the
+STATION-heartbeat sibling of PR 369's `/sensors` `capture_silent_sensor_watchdog_suspend` and PR 357's
+loaded-place-descent station PAUSE (`collect_place_station_pause`, which fully pauses both legs for the
+place descent); it keeps the tight `RESTOCK_STATION_SIM_GAP_S=60` in instead of the cw82 whole-run widen.
+The retreat *duration* itself (the one recommended but unimplemented lever: un-scale the empty post-release
+retreat velocity) is a separate, GPU-validated follow-up — this key makes the long-but-healthy retreat
+non-fatal regardless. Default off ⇒ byte-identical. CPU proof `tests/test_sim_retreat_station_heartbeat_scope.py`
++ `test_host_timers_pacing.py` (`CaptureSilentStationHeartbeatSuspend`, 1×/16×/30×,
+`simulate_capture_silent_station_suspend`); hand-off `docs/examples/retreat-station-heartbeat-scope-fragment.json`.
+
 ## Named-trigger instrumentation (so a bare emergency stop can never recur)
 
 The Isaac-side stop wire is a bare `Bool`, so the mission can only ever report `"host emergency stop"` with
