@@ -101,6 +101,12 @@ KEY_CONSUMER = {
     # backstop stays armed throughout. Default off => byte-identical. Sibling of the RUNTIME
     # collect_place_station_pause; registered so a key filed in the RUNTIME config is refused (run-277 slip).
     'place_descent_sensor_watchdog_suspend': HOST,
+    # sim-retreat-sensor-watchdog-scope-v1: broaden the per-frame /sensors SIM watchdog suspension to EVERY
+    # capture-silent phase (RosTransferBridge, read by ros_host -> the HOST manip process) -- the post-place
+    # retreat/stow at least (coldwin76/77/78). The wall backstop stays armed throughout. Default off =>
+    # byte-identical. Sibling of the HOST place_descent_sensor_watchdog_suspend; registered so a key filed in
+    # the RUNTIME config is refused.
+    'capture_silent_sensor_watchdog_suspend': HOST,
     # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the free-space
     # arm legs (ros_host -> TransferController). reactive_arm_human toggles it; reactive_arm is the optional
     # tuning dict (gate dwell/fractions, backstop params, replannable_phases). Absent/False => byte-identical.

@@ -404,7 +404,12 @@ def main():
         # controller is in the loaded place descent (the station/source decode stream legitimately stalls
         # under the full-six-axis base lock + deep render pacing -- coldwin64). The 180 s wall backstop
         # stays armed throughout. Default off => byte-identical.
-        suspend_place_descent_watchdog=bool(config.get('place_descent_sensor_watchdog_suspend', False)))
+        suspend_place_descent_watchdog=bool(config.get('place_descent_sensor_watchdog_suspend', False)),
+        # sim-retreat-sensor-watchdog-scope-v1: broaden that suspension to EVERY capture-silent phase
+        # (controller.in_capture_silent_window -- the post-place retreat/stow at least, where coldwin76/77/78
+        # each died on a watchdog counting a legitimately quiet period). The wall backstop stays armed
+        # throughout. Default off => byte-identical.
+        suspend_capture_silent_watchdog=bool(config.get('capture_silent_sensor_watchdog_suspend', False)))
     # sim-host-status-watchdog-v1: the payload ack waits (RosPayloadSync._wait) block the main host
     # executor, silencing the controller-driven /manipulation/status stream for the whole bounded wait
     # (the grasp/weld attach, the post-move_group-respawn carton reconcile, the release detach). Pulse a

@@ -1184,6 +1184,21 @@ class TransferController:
         release (``held`` goes False) or on leaving the ``place`` phase."""
         return self.phase == 'place' and bool(self.held)
 
+    def in_capture_silent_window(self):
+        """sim-retreat-sensor-watchdog-scope-v1: True while the collect capture is SILENT BY DESIGN for the
+        current phase -- i.e. the decode-camera render is suspended and the held registration republished
+        (``sensing_render_required(phase)`` is False). This is the authoritative, single-source definition of
+        the capture-silent phases (``isaac_sensors._SENSING_SUSPEND_PHASES``: the validated-reach EXECUTION
+        phases approach/contact/grasp/lift/preplace/place/retreat/release/stow/couple and the carry swing-outs
+        tuck/pan/retreat_tuck), so the suspension window matches EXACTLY the phases where ``/sensors`` emits
+        nothing. ``in_loaded_place_descent`` (place + held, PR 357) is a subset of this; the post-place
+        ``retreat`` and ``stow`` -- where coldwin76/77/78 each died on a different watchdog counting a
+        legitimately quiet period -- are the phases this adds. True only inside that set, so the broad
+        suspension is never active for the capture-bearing phases (observe / verify re-validation); re-armed
+        the instant the phase steps back into a capture-bearing one. The WALL backstop stays armed throughout."""
+        from .isaac_sensors import sensing_render_required
+        return not sensing_render_required(self.phase)
+
     def _release_arm_stopped(self, now, sensors):
         """sim-place-release-cancel-handshake-v1: fold one release-phase tick of measured joint motion and
         report whether the arm is PROVABLY stopped -- the measured max joint speed (finite difference of
