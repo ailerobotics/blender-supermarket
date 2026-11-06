@@ -330,9 +330,18 @@ def description(config):
     # Auxiliary: it is deliberately NOT a shutdown guard (its loss must not tear down the
     # planner), but the guards above do tear it down with the stack, so a live ack node
     # implies a live planner/mapper -- which is why its snapshot reports process_alive.
+    # sim-retreat-station-heartbeat-scope-v1 (opt-in HOST key, default off => byte-identical): suspend the
+    # parked-station SIM-gap liveness bound over the capture-silent retreat/stow window (coldwin81 died on
+    # 'parked heartbeat lost: sim gap 60.02 s' inside a legitimately silent ~98 sim-s retreat). The station
+    # node (incorporation_ack) is a separate process reading env, so translate the committed-HOST-config key
+    # into the env var it reads. Absent/false => no env set => byte-identical.
+    ack_env = {}
+    if host_cfg.get('capture_silent_station_heartbeat_suspend'):
+        ack_env['RESTOCK_STATION_HEARTBEAT_CAPTURE_SILENT_SUSPEND'] = '1'
     ack = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock_host.incorporation_ack',
         '--workspace-min', *(str(v) for v in plan['workspace_min']),
-        '--workspace-max', *(str(v) for v in plan['workspace_max'])], output='screen')
+        '--workspace-max', *(str(v) for v in plan['workspace_max'])], output='screen',
+        **({'additional_env': ack_env} if ack_env else {}))
     # Observe-only move_group respawn logger: NOT a shutdown guard and NOT a respawner -- it logs
     # each respawn / the give-up BY NAME with the attempt count (so the double-death proof is
     # greppable) and returns no launch actions, leaving ROS 2 launch the sole respawner. The

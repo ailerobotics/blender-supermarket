@@ -110,6 +110,20 @@ class IncorporationAckState:
         # and issue a fresh one immediately, so the post-attach ESDF integrates ~a cycle sooner. Pure
         # sequencing lives on this state object (unit-tested); the ROS subscription is glue.
         self.kick_enabled = (os.environ.get('RESTOCK_ESDF_POSTATTACH_KICK', '0') not in ('0', '', 'false', 'False'))
+        # sim-retreat-station-heartbeat-scope-v1 (opt-in, default off => byte-identical): suspend the
+        # parked-station SIM-gap liveness bound over every CAPTURE-SILENT controller phase (the post-place
+        # retreat/stow at least), exactly as the per-frame /sensors sensor watchdog already is (PR 369). The
+        # mission is busy executing a long, silent arm leg (coldwin81: a ~98 sim-s empty retreat whose first
+        # trajectory segment unwinds wrist_2 ~1.33 rad at ~0.013 rad/s) and does not heartbeat the parked
+        # station, so the 60 s SIM-gap guard false-trips a healthy run ('parked heartbeat lost: sim gap
+        # 60.02 s' -> latched global stop -> collect StageRetry loop). Only the SIM leg is suspended; the
+        # frozen-sim WALL backstop (snapshot below) stays armed so a genuinely stalled sim is still caught.
+        # HOST config key capture_silent_station_heartbeat_suspend (restock_host.launch sets this env from it);
+        # the node subscribes /manipulation/status for the phase and flips the latch on the window edges.
+        self.hb_capture_silent_suspend = (
+            os.environ.get('RESTOCK_STATION_HEARTBEAT_CAPTURE_SILENT_SUSPEND', '0')
+            not in ('0', '', 'false', 'False'))
+        self.heartbeat_suspended = False
         # sim-robust-esdf-boot-gate-v2: PROOF/TEST switch (opt-in, default off => byte-identical). When set,
         # acknowledge() REFUSES every stamp, so collision_time never advances past the -1 not-ready sentinel
         # -- a faithful "nvblox genuinely never incorporates" reproduction (the arm host sees exactly the
@@ -250,6 +264,33 @@ class IncorporationAckState:
         self._release_wire_pending = False
         return r
 
+    def note_heartbeat_phase(self, phase):
+        """sim-retreat-station-heartbeat-scope-v1: drive the capture-silent parked-heartbeat SIM-gap
+        suspension off the mission phase (/manipulation/status carries ``phase``). On entry to a
+        capture-silent phase (``sensing_render_required(phase)`` False -- the authoritative shared set),
+        latch ``heartbeat_suspended`` so ``snapshot`` skips the SIM-gap leg (keeping the frozen-sim WALL
+        backstop armed); on re-entry to a capture-bearing phase (observe / verify) clear it. Returns a
+        named log line to print on each window EDGE (STATION_HEARTBEAT_SUSPENDED / _REARMED) so a run log
+        shows the exact window, else None. No-op (returns None, never latches) when the key is off, so the
+        default path is byte-identical. Pure: the ROS subscription is glue, the sequencing is unit-tested."""
+        if not self.hb_capture_silent_suspend:
+            return None
+        # Import the shared predicate from the pure leaf (no numpy / restock_camera) so this separate
+        # process scopes the IDENTICAL window as the sensor watchdog with no drift.
+        from ..restock_manipulation.capture_phases import sensing_render_required
+        capture_silent = not sensing_render_required(phase)
+        if capture_silent and not self.heartbeat_suspended:
+            self.heartbeat_suspended = True
+            return ('STATION_HEARTBEAT_SUSPENDED phase=%s reason=capture_silent (parked-station SIM-gap '
+                    'liveness suspended for a capture-silent phase (the mission executes a long silent arm '
+                    'leg and does not heartbeat the parked station); frozen-sim WALL backstop %.0fs still '
+                    'armed)' % (phase, self.wall_backstop_s))
+        if not capture_silent and self.heartbeat_suspended:
+            self.heartbeat_suspended = False
+            return ('STATION_HEARTBEAT_REARMED phase=%s reason=capture_silent_exit (parked-station SIM-gap '
+                    'liveness re-armed)' % (phase,))
+        return None
+
     def acknowledge(self, stamp, epoch):
         if self.force_never_ack:
             # sim-robust-esdf-boot-gate-v2 proof switch: refuse through the REAL reject path so
@@ -278,6 +319,18 @@ class IncorporationAckState:
             wall_gap = self.wall_clock() - self.wall_heartbeat
             if not process_alive:
                 self.fault = 'station process lost'
+            elif self.heartbeat_suspended:
+                # sim-retreat-station-heartbeat-scope-v1: a capture-silent retreat/stow window -- the SIM
+                # gap is legitimate (the mission is executing a long silent arm leg, coldwin81's ~98 sim-s
+                # retreat), so suspend ONLY the SIM leg. Keep the SIM anchor fresh (so the resume on the
+                # next capture-bearing phase sees no stale accumulated gap, mirroring the sensor watchdog)
+                # and leave wall_heartbeat untouched so the frozen-sim WALL backstop keeps measuring the
+                # true wall gap -- a genuinely stalled sim is still caught by name inside the window.
+                self.last_heartbeat = now
+                if pace_is_dead(sim_elapsed=None, wall_elapsed=wall_gap, sim_budget=None,
+                                wall_backstop=self.wall_backstop_s, mode='either'):
+                    self.fault = (f'parked heartbeat lost: wall gap {wall_gap:.2f} s '
+                                  f'(capture-silent frozen-sim backstop)')
             elif pace_is_dead(sim_elapsed=sim_gap, wall_elapsed=wall_gap, sim_budget=self.sim_gap_s,
                               wall_backstop=self.wall_backstop_s, mode='either'):
                 self.fault = (f'parked heartbeat lost: sim gap {sim_gap:.2f} s' if sim_gap > self.sim_gap_s
@@ -480,16 +533,21 @@ def main():
 
     def manip_status(message):
         # fm430 (2a): arm the post-attach ESDF kick on the mission phase rising into 'lift' (post-weld).
-        # Best-effort: a malformed/absent status never disturbs the ack node.
+        # sim-retreat-station-heartbeat-scope-v1: ALSO drive the capture-silent parked-heartbeat SIM-gap
+        # suspension off the same phase. Best-effort: a malformed/absent status never disturbs the ack node.
         try:
             data = json.loads(message.data)
-            if state.note_manip_phase(data.get('phase')):
+            phase = data.get('phase')
+            if state.kick_enabled and state.note_manip_phase(phase):
                 node.get_logger().info('post-attach ESDF kick armed (manipulation phase -> lift)')
+            line = state.note_heartbeat_phase(phase)
+            if line:
+                print(line, flush=True)
         except (ValueError, TypeError, AttributeError):
             pass
 
     node.create_subscription(String, NS + '/station/command', command, 10)
-    if state.kick_enabled:
+    if state.kick_enabled or state.hb_capture_silent_suspend:
         node.create_subscription(String, NS + '/manipulation/status', manip_status, 10)
     node.create_timer(.05, tick)
     try:

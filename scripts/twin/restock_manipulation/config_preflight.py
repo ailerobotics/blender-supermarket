@@ -107,6 +107,13 @@ KEY_CONSUMER = {
     # byte-identical. Sibling of the HOST place_descent_sensor_watchdog_suspend; registered so a key filed in
     # the RUNTIME config is refused.
     'capture_silent_sensor_watchdog_suspend': HOST,
+    # sim-retreat-station-heartbeat-scope-v1: suspend the PARKED-STATION SIM-gap liveness bound over EVERY
+    # capture-silent phase (the post-place retreat/stow), exactly as the sensor watchdog above. The station
+    # node (restock_host.incorporation_ack) is a separate process reading env, so restock_host.launch reads
+    # this HOST-config key and translates it into RESTOCK_STATION_HEARTBEAT_CAPTURE_SILENT_SUSPEND. The wall
+    # backstop stays armed throughout. Default off => byte-identical. Registered so a key filed in the
+    # RUNTIME config is refused before the GPU boot (the run-277 slip).
+    'capture_silent_station_heartbeat_suspend': HOST,
     # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the free-space
     # arm legs (ros_host -> TransferController). reactive_arm_human toggles it; reactive_arm is the optional
     # tuning dict (gate dwell/fractions, backstop params, replannable_phases). Absent/False => byte-identical.

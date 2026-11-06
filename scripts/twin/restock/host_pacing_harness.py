@@ -172,6 +172,58 @@ def simulate_far_station_paused(*, pacing, sim_gap_budget, wall_floor, far_op_si
     raise AssertionError('far-station guard neither survived nor tripped within max_wall -- unbounded wait')
 
 
+def simulate_capture_silent_station_suspend(*, pacing, sim_gap_budget, wall_floor, retreat_sim,
+                                            suspend=True, frozen=False, enter_phase='retreat',
+                                            exit_phase='verify', dwall=0.5, max_wall=4000000.0):
+    """Drive the SHIPPED parked-station heartbeat guard through a CAPTURE-SILENT retreat/stow window.
+
+    Models sim-retreat-station-heartbeat-scope-v1 (coldwin81): after the loaded place + contact release the
+    mission executes a long, SILENT empty retreat (its first trajectory segment unwinds wrist_2 ~1.33 rad at
+    ~0.013 rad/s => ~98 sim-s) during which it does NOT heartbeat the still-parked collect station. With the
+    60 s SIM-gap budget that false-trips a healthy run ('parked heartbeat lost: sim gap 60.02 s' -> latched
+    global stop -> collect StageRetry loop). With ``suspend=True`` the mission's phase goes capture-silent
+    (``enter_phase``) and the node suspends ONLY the SIM leg (the frozen-sim WALL backstop stays armed), then
+    re-arms on the next capture-bearing phase (``exit_phase``). ``suspend=False`` reproduces the pre-fix fault
+    (key off => the SIM gap still trips). ``frozen=True`` holds the sim still for the whole window (a genuinely
+    dead simulator) so the WALL backstop must still catch it even while suspended.
+
+    Drives the REAL ``restock_host.incorporation_ack.IncorporationAckState`` (budgets set directly on the
+    shipped object; ``wall_backstop_s`` re-derived with the shipped ``frozen_sim_wall_backstop``; the suspend
+    key toggled on the object, as the env would). Returns a dict: outcome in
+    {'survived','tripped_sim','tripped_wall'} with the final wall/sim readings, the reason, the published
+    state and whether the guard was suspended across the window. Raises on an unbounded wait."""
+    from twin.restock_host.incorporation_ack import IncorporationAckState
+    clock = FakeClockPair(pacing=pacing, frozen=False)
+    st = IncorporationAckState(wall_clock=lambda: clock.wall)
+    st.sim_gap_s = float(sim_gap_budget)
+    st.wall_gap_s = float(wall_floor)
+    st.wall_backstop_s = frozen_sim_wall_backstop(sim_gap_budget, wall_floor)
+    st.hb_capture_silent_suspend = bool(suspend)
+    st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=0.0, parked=True,
+                   camera_frame='restock_camera_collect'), 0.0)
+    # The mission's phase enters the capture-silent retreat/stow window (STATION_HEARTBEAT_SUSPENDED edge).
+    suspended_line = st.note_heartbeat_phase(enter_phase)
+    clock.frozen = bool(frozen)                       # the retreat begins; a frozen sim stalls /clock here
+    op_start_sim = clock.sim
+    while clock.wall <= max_wall:
+        snap = st.snapshot(clock.sim, endpoints_ready=True, process_alive=True)
+        if snap['state'] == 'failed':
+            leg = 'tripped_sim' if 'sim gap' in snap['reason'] else 'tripped_wall'
+            return {'outcome': leg, 'wall': clock.wall, 'sim': clock.sim, 'reason': snap['reason'],
+                    'state': snap['state'], 'suspended_entry': bool(suspended_line)}
+        # The healthy retreat completes after retreat_sim SIM seconds; the mission then re-enters a
+        # capture-bearing phase (verify), which re-arms the SIM gap (STATION_HEARTBEAT_REARMED edge).
+        if not frozen and (clock.sim - op_start_sim) >= retreat_sim:
+            rearmed_line = st.note_heartbeat_phase(exit_phase)
+            snap = st.snapshot(clock.sim, endpoints_ready=True, process_alive=True)
+            return {'outcome': 'tripped_sim' if snap['state'] == 'failed' and 'sim gap' in snap['reason']
+                    else 'tripped_wall' if snap['state'] == 'failed' else 'survived',
+                    'wall': clock.wall, 'sim': clock.sim, 'reason': snap['reason'], 'state': snap['state'],
+                    'suspended_entry': bool(suspended_line), 'rearmed_exit': bool(rearmed_line)}
+        clock.advance(dwall)
+    raise AssertionError('capture-silent station guard neither survived nor tripped -- unbounded wait')
+
+
 def simulate_loaded_collect_heartbeat_read_lag(*, pacing, sim_gap_budget, wall_floor, read_lag_sim,
                                                op_sim, dwall=0.5, max_wall=2000000.0):
     """Reproduce the intermittent COLLECT host e-stop (sim-collect-host-estop-v1) on CPU.
