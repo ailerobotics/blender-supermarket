@@ -486,6 +486,36 @@ Recommended ON values + bounded-GPU acceptance: `docs/examples/preplace-pan-firs
 CPU proof: `scripts/twin/tests/test_preplace_pan_first_seeded_leg2_v1.py`;
 write-up: `data/sim-preplace-pan-first-seeded-leg2-v1/report.md`.
 
+#### Discard descent-infeasible standoffs (sim-preplace-branch-descent-feasible-v1)
+
+coldwin79 sealed the pick and converged the pre-place, then the carton-level **place-descent** gate
+(`CARTON_LEVEL_PLACE_DESCENT`) refused the set-down **before motion** because the descent from the chosen
+standoff would roll the carton **3.43°** (> the 2.0° bound) → `HOST_FAULT_ESTOP phase=place`. Runs 76/77/78
+descended level from the *same* configuration. The carry-connected selector above ranked candidates only by
+carry travel + the leg-2 continuity gate and returned the **first leg-2-accepted** branch — it never checked
+the **place descent** from that standoff. The candidate set and each branch's leg-2 step depend on the run's
+measured carry pose / sensed place target (a few mm/mrad of drift), so the greedy winner flipped from a
+~0.59 `wrist_2` level branch (cw76/77/78) to the low `wrist_2`=0.052 branch whose descent is infeasible
+(cw79) — a lottery.
+
+- **Descent feasibility filter** (HOST `carton_level.preplace_descent_feasible`, requires
+  `preplace_branch_prefer_carry_connected`; default off ⇒ byte-identical): the controller hands
+  `select_carry_connected_standoff` a `descent_predictor` — the **same** `plan_compensated_place_descent` the
+  place-descent gate runs, from each **candidate** standoff to the resolved support (same seed = the leveled
+  `collect_place_preplace_shape`, base-frame up-axis, gravity compensation, `place_from_above` /
+  `place_above_clearance_m` / `place_depth_bias_m` / `path_waypoints`). The selector **discards** any candidate
+  whose predicted descent exceeds the bound and chooses **deterministically** by the stable key (least carry
+  travel, then descent tilt, then leg-2 max wrist step, then `wrist_2` nearest the carry value) — independent
+  of the search time / enumeration order, so the set-down is no longer a lottery. Logs
+  `PREPLACE_BRANCH_CANDIDATES n=… chosen=… descent_tilt=… leg2_step=…` with both scores per candidate. The
+  2.0° bound is **untouched**; the leg-2 continuity gate stays the approach authority. CPU-reproduced: the
+  cw79 low-`wrist_2` standoff descent is ~3.5° (the logged 3.43° signature) while the mid-`wrist_2` branches
+  are ~1.8°.
+
+Recommended ON values + bounded-GPU acceptance: `docs/examples/preplace-branch-descent-feasible-fragment.json`;
+CPU proof: `scripts/twin/tests/test_preplace_branch_descent_feasible_v1.py`;
+write-up: `data/sim-preplace-branch-descent-feasible-v1/report.md`.
+
 ## Contact-gated place-descent release (sim-place-release-on-contact-v1)
 
 The collect deck set-down releases the weld the instant the support is **actually touched**, not at a
