@@ -456,6 +456,36 @@ Recommended ON values + bounded-GPU acceptance: `docs/examples/preplace-sweep-ca
 CPU proof: `scripts/check_preplace_sweep_clearance.py`, `scripts/twin/tests/test_preplace_sweep_clearance.py`;
 write-up: `data/sim-preplace-sweep-cage-clearance-v1/report.md`.
 
+### Carry-connected standoff for the pan-first leg 2 (sim-preplace-pan-first-seeded-leg2-v1)
+
+coldwin72 — the first run with every physical fix stacked (pick sealed, the pan swept the cage clear with
+the base locked + low arm effort, the wrist held) — was stopped **before any motion** by the carton-level
+continuity gate in the **pan-first leg 2** (the extend above): the leg-2 `wrist_2` held ~0 for nine
+waypoints then **jumped 0.300 rad** in one step (> the 0.15 rad continuity limit the soft wrist can track)
+→ `CARTON_LEVEL_PLAN_REJECTED` at waypoint 10/18. The PR 349 seeded interior was **already applied** to
+leg 2 (CPU-reproduced byte-for-byte); it cannot help. Root cause (CPU-proven): with `shoulder_pan` held at
+the **standoff** value and the `carry_wrist1_cap` (0.65) self-collision cap in force, the carry/tucked
+shape (`wrist_2` ~0) and the reach-valid reaction-natural standoff (`wrist_2` 0.668) sit on **disconnected
+carton-level basins** — the standoff branch needs `wrist_1` up to ~1.30 near the start pose (far over the
+cap), so no continuous monotonic ≤ 0.15 rad level path connects them (the crossing tilt ridge minimum is
+~2.44° > the 2.0° bound, for *every* `wrist_1` cap).
+
+- **Carry-connected branch** (HOST `carton_level.preplace_branch_prefer_carry_connected`, requires
+  `preplace_reaction_branch`; default off ⇒ byte-identical): `select_carry_connected_standoff` enumerates
+  the reach+level+self-clear standoff branches (seeded from the carry shape *and* the reach shape, `wrist_2`
+  swept), ranks them by total wrist travel from the carry shape, and returns the **first** whose leg-2
+  world-level plan the continuity gate **accepts** (step ≤ `preplace_max_wrist_step_rad` *and* tilt ≤ the
+  bound) — the gate stays the authority. On cw72 it picks a `wrist_2` ~0.09 standoff whose leg 2 is a
+  monotonic extension (max wrist step 0.143 rad, tilt 0.52°), and the place descent from it stays level
+  (0.02°). Logs `PREPLACE_REACTION_BRANCH chosen wrist_2=… reason=carry-connected`. The PR 359 firm wrist
+  hold now covers the soft-wrist drift that originally pushed PR 345 to the 0.668 settling branch, so the
+  ~0 branch is admissible again. The search is bounded by `preplace_branch_select_budget_s` (measured
+  ~3.8 s CPU, well under the budget and the render-paced wall of the 5 sim-s host-status watchdog).
+
+Recommended ON values + bounded-GPU acceptance: `docs/examples/preplace-pan-first-seeded-leg2-fragment.json`;
+CPU proof: `scripts/twin/tests/test_preplace_pan_first_seeded_leg2_v1.py`;
+write-up: `data/sim-preplace-pan-first-seeded-leg2-v1/report.md`.
+
 ## Contact-gated place-descent release (sim-place-release-on-contact-v1)
 
 The collect deck set-down releases the weld the instant the support is **actually touched**, not at a
