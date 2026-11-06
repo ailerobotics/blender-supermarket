@@ -136,7 +136,7 @@
   "place_reapproach_shift_m": 0.03
  },
  "preplace_convergence_stall_s": 30.0,
- "preplace_drift_recapture_rad": 0.0,
+ "preplace_drift_recapture_rad": 0.05,
  "preplace_drift_recapture_max": 3,
  "preplace_wrist_first": true,
  "station_pitch_hold": true,
@@ -150,5 +150,6 @@
  "contact_accept_seal_diag": false,
  "contact_seal_diag_dwell_ticks": 5,
  "contact_seal_diag_max_gap_mm": 0.5,
- "contact_seal_diag_max_angle_deg": 1.0
+ "contact_seal_diag_max_angle_deg": 1.0,
+ "preplace_pan_first": true
 }
