@@ -800,6 +800,11 @@ class TransferController:
         self._release_cancel_pending = False   # a contact-release cancel+settle is owed before the detach
         self._release_cancel_issued = False    # the cancel() request has been sent to the motion port
         self._release_cancel_sim_start = None  # sim time the cancel was requested (bounds the settle wait)
+        # sim-place-release-cancel-handshake-v1: stopped-arm release fallback state (handshake path only).
+        # Inert unless release_cancel_handshake is on AND the terminal does not arrive => byte-identical.
+        self._release_stopped_ticks = 0        # consecutive ticks the measured arm has read stopped
+        self._release_prev_q = None            # previous tick's joint_positions (for the finite-diff speed)
+        self._release_prev_q_sim = None        # sim time of the previous joint_positions sample
         # The bounded SIM-clock budget for the place-cancel to reach a terminal result before the release
         # detach (report + fail BY NAME, never detach blindly into an in-flight planning scene). Internal
         # (env-tunable), clamped under the per-phase timeout; NO HOST/RUNTIME config key (config_preflight
@@ -1075,6 +1080,10 @@ class TransferController:
         self._release_cancel_pending = False
         self._release_cancel_issued = False
         self._release_cancel_sim_start = None
+        # sim-place-release-cancel-handshake-v1: fresh stopped-arm fallback sub-state per op.
+        self._release_stopped_ticks = 0
+        self._release_prev_q = None
+        self._release_prev_q_sim = None
 
     def _fresh(self, stamp, now):
         return math.isfinite(stamp) and -self.render_lead <= now - stamp <= self.max_age
@@ -1174,6 +1183,34 @@ class TransferController:
         everywhere else, so the suspension is never active outside the loaded descent -- re-armed on
         release (``held`` goes False) or on leaving the ``place`` phase."""
         return self.phase == 'place' and bool(self.held)
+
+    def _release_arm_stopped(self, now, sensors):
+        """sim-place-release-cancel-handshake-v1: fold one release-phase tick of measured joint motion and
+        report whether the arm is PROVABLY stopped -- the measured max joint speed (finite difference of
+        ``sensors.joint_positions`` over the sim-time delta) has stayed at/below
+        ``release_cancel_stopped_vel`` for ``release_cancel_stopped_ticks`` consecutive ticks. Returns the
+        measured max joint speed (rad/s) once the stopped-tick count is met, else None (still moving, or not
+        enough samples / a non-positive sim-time delta). NEVER reports stopped off a single sample, so the
+        caller never detaches into a moving arm. Pure book-keeping on the controller's own release state."""
+        cl = self._carton_level
+        vel_thresh = float(getattr(cl, 'release_cancel_stopped_vel', 0.02))
+        need_ticks = int(getattr(cl, 'release_cancel_stopped_ticks', 3))
+        q = tuple(float(v) for v in sensors.joint_positions)
+        prev_q, prev_t = self._release_prev_q, self._release_prev_q_sim
+        self._release_prev_q, self._release_prev_q_sim = q, now
+        if prev_q is None or prev_t is None or len(prev_q) != len(q):
+            return None                          # first sample this release: establish the baseline, no verdict
+        dt = now - prev_t
+        if not (dt > 0):
+            return None                          # need a positive sim-time delta to measure a speed
+        max_speed = max(abs(a - b) for a, b in zip(q, prev_q)) / dt
+        if max_speed <= vel_thresh:
+            self._release_stopped_ticks += 1
+        else:
+            self._release_stopped_ticks = 0
+        if self._release_stopped_ticks >= need_ticks:
+            return max_speed
+        return None
 
     def _place_wrist_guard(self):
         """The (wrist1_cap, wrist2_min) clear carry region a place-side KDL goal must satisfy, else the
@@ -3647,9 +3684,34 @@ class TransferController:
                     # fail BY NAME rather than risk the detach-in-flight invariant (never silently detach).
                     return self._fail('contact-release needs a cancellable motion port '
                                       '(cancel/cancel_outcome) to serialize the release detach')
+                # sim-place-release-cancel-handshake-v1: opt-in. The place descent is a DRIVEN trajectory on
+                # the sim FollowJointTrajectory executor, so the default ExecuteTrajectory ``cancel()`` is
+                # BOTH dropped in the goal-accept race (``self.handle is None`` at the stall -- cw74/cw75) AND
+                # unsafe (the sim trajectory_host treats a goal cancel as a FAULT that latches the global
+                # stop). When on, STOP the descent on its OWN channel -- emit the contact-hold control so
+                # trajectory_host SUCCEEDS holding the current pose (terminal, no fault, no stop) and mark the
+                # port cancel-requested (``settle_in_place``, no ``cancel_goal_async``) so ``cancel_outcome``
+                # reads the resolved execute future -- and, if the terminal still never arrives but the arm is
+                # PROVABLY stopped, log RELEASE_CANCEL_STOPPED_FALLBACK and proceed. Off => the legacy
+                # ``cancel()`` path below, byte-identical.
+                _handshake = (self._carton_level is not None
+                              and getattr(self._carton_level, 'release_cancel_handshake', False))
                 if not self._release_cancel_issued:
-                    cancel()   # request the cancel; the arm holds its last commanded pose. NO emergency stop.
                     self._release_cancel_issued = True
+                    if _handshake:
+                        settle = getattr(self.motion, 'settle_in_place', None)
+                        if callable(settle):
+                            settle()      # arm cancel_outcome to read the terminal; NO cancel_goal_async
+                        self._release_stopped_ticks = 0
+                        self._release_prev_q = None
+                        self._release_prev_q_sim = None
+                        print('PLACE_CONTACT_RELEASE_CANCEL phase=release now=%.3f: hold-and-settle the '
+                              'in-flight place descent on the arm_contact channel (an ExecuteTrajectory '
+                              'cancel is dropped in the goal-accept race and the sim trajectory executor '
+                              'treats it as a FAULT+global-stop) before the release detach; waiting for the '
+                              'terminal result' % now, flush=True)
+                        return self._result(({'kind': 'contact'},))
+                    cancel()   # request the cancel; the arm holds its last commanded pose. NO emergency stop.
                     print('PLACE_CONTACT_RELEASE_CANCEL phase=release now=%.3f: cancelling the in-flight place '
                           'execute (the cancel is the stop -- the arm stops pressing the welded carton into '
                           'the deck) before the release detach; waiting for the terminal result' % now,
@@ -3657,27 +3719,61 @@ class TransferController:
                     return self._result()
                 outcome = outcome_fn()
                 if outcome is None:
-                    # Still settling: the place execute has not reached a terminal result yet. Wait a bounded
-                    # SIM-clock budget, then FAIL BY NAME -- never detach blindly into an in-flight scene.
-                    if now - self._release_cancel_sim_start > self.release_cancel_timeout_s:
-                        return self._fail('contact-release place-cancel did not reach a terminal result '
-                                          'within %.2fs sim of the cancel -- not detaching into an in-flight '
-                                          'planning scene' % self.release_cancel_timeout_s)
-                    return self._result()
-                if outcome == 'error':
+                    # Still settling: the place execute has not reached a terminal result yet.
+                    if _handshake:
+                        # Stopped-arm fallback: if the arm is PROVABLY stopped (measured max joint speed below
+                        # threshold for N consecutive ticks) proceed to detach from the stopped pose, forcing
+                        # the port terminal so the detach's _PLAN_IN_FLIGHT_STATES guard passes. NEVER detach
+                        # into a moving arm (the speed gate is the proof).
+                        stopped_speed = self._release_arm_stopped(now, s)
+                        if stopped_speed is not None:
+                            force_terminal = getattr(self.motion, 'force_terminal_settled', None)
+                            if callable(force_terminal):
+                                force_terminal()
+                            print('RELEASE_CANCEL_STOPPED_FALLBACK phase=release now=%.3f max_joint_speed='
+                                  '%.5f rad/s <= %.5f for %d ticks: the place-cancel terminal never arrived '
+                                  '(%.2fs sim) but the arm is provably stopped -> gripper-open + detach from '
+                                  'the stopped pose'
+                                  % (now, stopped_speed,
+                                     float(getattr(self._carton_level, 'release_cancel_stopped_vel', 0.02)),
+                                     self._release_stopped_ticks,
+                                     now - self._release_cancel_sim_start), flush=True)
+                            self.evidence.append({'release_cancel_stopped_fallback': {
+                                'sim_time': float(now), 'max_joint_speed': float(stopped_speed),
+                                'vel_threshold': float(getattr(self._carton_level,
+                                                               'release_cancel_stopped_vel', 0.02)),
+                                'ticks': int(self._release_stopped_ticks)}})
+                            self._release_cancel_pending = False
+                            # fall through to the gripper-open + detach below (issued stays False)
+                        elif now - self._release_cancel_sim_start > self.release_cancel_timeout_s:
+                            return self._fail('contact-release place hold-and-settle did not reach a terminal '
+                                              'result and the arm never read stopped within %.2fs sim -- not '
+                                              'detaching into an in-flight planning scene'
+                                              % self.release_cancel_timeout_s)
+                        else:
+                            return self._result()
+                    else:
+                        # Wait a bounded SIM-clock budget, then FAIL BY NAME -- never detach blindly.
+                        if now - self._release_cancel_sim_start > self.release_cancel_timeout_s:
+                            return self._fail('contact-release place-cancel did not reach a terminal result '
+                                              'within %.2fs sim of the cancel -- not detaching into an '
+                                              'in-flight planning scene' % self.release_cancel_timeout_s)
+                        return self._result()
+                elif outcome == 'error':
                     # The place execute terminated with a broken result: report, do not detach blindly.
                     return self._fail('contact-release place-cancel terminated with an error -- not '
                                       'detaching into a broken motion terminal')
-                # Terminal: 'cancelled' (the normal cancel outcome) or 'succeeded' (the place completed before
-                # the cancel landed). Either is a settled, stopped arm NOT in flight -> proceed to the gripper-
-                # open + detach from the settled pose. The adapter has moved its state out of the in-flight
-                # set, so the detach's _PLAN_IN_FLIGHT_STATES guard now passes.
-                print('PLACE_CONTACT_RELEASE_SETTLED phase=release now=%.3f outcome=%s (place execute '
-                      'terminal, arm settled) -> gripper-open + detach from the settled pose'
-                      % (now, outcome), flush=True)
-                self.evidence.append({'place_contact_release_settled':
-                                      {'outcome': outcome, 'sim_time': float(now)}})
-                self._release_cancel_pending = False
+                else:
+                    # Terminal: 'cancelled' (the normal cancel outcome) or 'succeeded' (the place completed /
+                    # the contact-hold succeeded). Either is a settled, stopped arm NOT in flight -> proceed to
+                    # the gripper-open + detach from the settled pose. The adapter has moved its state out of
+                    # the in-flight set, so the detach's _PLAN_IN_FLIGHT_STATES guard now passes.
+                    print('PLACE_CONTACT_RELEASE_SETTLED phase=release now=%.3f outcome=%s (place execute '
+                          'terminal, arm settled) -> gripper-open + detach from the settled pose'
+                          % (now, outcome), flush=True)
+                    self.evidence.append({'place_contact_release_settled':
+                                          {'outcome': outcome, 'sim_time': float(now)}})
+                    self._release_cancel_pending = False
                 # fall through to the gripper-open + detach below (same tick; issued is still False)
             if not self.issued:
                 if s.valid_until_steady is not None:

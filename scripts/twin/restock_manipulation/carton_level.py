@@ -684,6 +684,25 @@ class LevelConfig:
     place_obstruction_gap_mm: float = 2.0
     place_reapproach_max: int = 0                 # 0 => fail fast by name on obstruction (no re-approach)
     place_reapproach_shift_m: float = 0.03
+    # sim-place-release-cancel-handshake-v1 (coldwin74/75): when the contact-triggered weld release fires
+    # the release phase must STOP the in-flight place descent and reach a TERMINAL, settled result before
+    # it detaches (PR 334 serialization). The default path CANCELS the ExecuteTrajectory (``motion.cancel``),
+    # but the place descent is a DRIVEN trajectory on the sim FollowJointTrajectory executor: an action
+    # cancel is BOTH dropped in the goal-accept race (``self.handle is None`` when the stall fires, so
+    # ``cancel_goal_async`` never goes out -- cw75 line 24459) AND unsafe (the sim trajectory_host treats a
+    # goal cancel as a FAULT and latches the global ``/manipulation/stop``). ``cancel_outcome`` then stays
+    # None for the whole budget and the run e-stops with the carton still welded on the shelf (cw74 2.0 s,
+    # cw75 8.0 s). With ``release_cancel_handshake`` on, the release phase STOPS the descent on its OWN
+    # channel -- it emits the contact-hold control so trajectory_host SUCCEEDS holding the current pose
+    # (terminal, no fault, no global stop) and marks the port cancel-requested so ``cancel_outcome`` reads
+    # the resolved execute future -- and, if the terminal still never arrives but the arm is PROVABLY
+    # stopped (measured max joint speed <= ``release_cancel_stopped_vel`` rad/s for
+    # ``release_cancel_stopped_ticks`` consecutive ticks), logs ``RELEASE_CANCEL_STOPPED_FALLBACK`` and
+    # proceeds to the gripper-open + detach from the stopped pose. NEVER detaches into a moving arm. Default
+    # off => the legacy ``motion.cancel`` path => byte-identical.
+    release_cancel_handshake: bool = False
+    release_cancel_stopped_vel: float = 0.02       # rad/s: max measured joint speed that counts as stopped
+    release_cancel_stopped_ticks: int = 3          # consecutive stopped ticks before the fallback proceeds
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -736,6 +755,15 @@ class LevelConfig:
                 or self.place_reapproach_max < 0:
             raise ValueError('carton_level.place_reapproach_max must be a non-negative integer '
                              '(0 => fail by name on obstruction with no re-approach)')
+        # sim-place-release-cancel-handshake-v1
+        if not (math.isfinite(float(self.release_cancel_stopped_vel)) and float(self.release_cancel_stopped_vel) > 0):
+            raise ValueError('carton_level.release_cancel_stopped_vel must be a finite positive rad/s '
+                             '(the max measured joint speed the stopped-arm release fallback tolerates)')
+        if isinstance(self.release_cancel_stopped_ticks, bool) \
+                or not isinstance(self.release_cancel_stopped_ticks, int) \
+                or self.release_cancel_stopped_ticks < 1:
+            raise ValueError('carton_level.release_cancel_stopped_ticks must be a positive integer '
+                             '(consecutive stopped ticks before the release fallback proceeds)')
         if self.place_release_contact_gap_mm is not None and not (
                 math.isfinite(float(self.place_release_contact_gap_mm))
                 and float(self.place_release_contact_gap_mm) > 0):
@@ -835,15 +863,16 @@ def resolve_level_config(spec):
                  'closed_loop_level', 'place_contact_release', 'closed_loop_sensor',
                  'preplace_above_support', 'preplace_level_gate', 'preplace_reaction_branch',
                  'preplace_seeded_interior', 'preplace_branch_prefer_carry_connected',
-                 'place_release_on_contact'):
+                 'place_release_on_contact', 'release_cancel_handshake'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
-    # sim-place-release-on-contact-v1
+    # sim-place-release-on-contact-v1 / sim-place-release-cancel-handshake-v1
     for fnum in ('place_release_effort_margin_nm', 'place_release_stall_m', 'place_obstruction_gap_mm',
-                 'place_reapproach_shift_m'):
+                 'place_reapproach_shift_m', 'release_cancel_stopped_vel'):
         if spec.get(fnum) is not None:
             kw[fnum] = float(spec[fnum])
-    for fint in ('place_release_effort_consecutive', 'place_release_stall_ticks', 'place_reapproach_max'):
+    for fint in ('place_release_effort_consecutive', 'place_release_stall_ticks', 'place_reapproach_max',
+                 'release_cancel_stopped_ticks'):
         if spec.get(fint) is not None:
             kw[fint] = int(spec[fint])
     if spec.get('place_release_contact_gap_mm') is not None:
