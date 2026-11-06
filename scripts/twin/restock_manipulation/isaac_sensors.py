@@ -55,34 +55,16 @@ from ..restock_camera.sensed import FrameEvidence, SupportView, masked_cloud, co
 from ..restock_camera.qr import FixedTileQR, FrameQR, rgb_digest
 
 
-#: Controller phases whose decode-camera render is unused: observe has validated the registration
-#: and cuMotion is executing the reach, so the arm occludes the fixed camera (the OBSERVE-THEN-
-#: EXECUTE lock). The opt-in sensing gate suspends the render for these and republishes the held
-#: registration. 'couple' is the cart-coupling action's execution phase.
-#: The WHOLE cart holding chain (preplace/place/retreat) is suspended too (firstmate 286, observe-
-#: then-execute choreography extension): once lift has the carton, the arm reaching to the cart
-#: occludes the fixed source camera just as badly as the pick reach, so a preplace re-validation that
-#: RESUMED the render stalled /sensors to the wall backstop (run-227). The cart placement target is
-#: DERIVED from the cart prim (not camera-sensed), so the held re-validation fabricates nothing;
-#: the fixed camera resumes only after retreat clears the view (next non-suspended phase: verify).
-#: The staged cart-swing via points (firstmate 292: tuck/pan on the way out, retreat_tuck on the way
-#: back) are part of the held carry chain -- the arm swings the carton and occludes the fixed camera --
-#: so they suspend the render exactly like lift/preplace/retreat.
-_SENSING_SUSPEND_PHASES = frozenset({'approach', 'contact', 'grasp', 'lift', 'preplace', 'place',
-                                     'retreat', 'release', 'stow', 'couple',
-                                     'tuck', 'pan', 'retreat_tuck'})
-
-
-def sensing_render_required(phase):
-    """Whether the decode camera must render for this controller phase.
-
-    False only for the execution phases in ``_SENSING_SUSPEND_PHASES`` (observe already validated the
-    registration and the rendered frame is unused while the arm occludes the fixed camera). True for
-    observe and the verify re-validation, and for any other/unknown phase -- fail safe:
-    never suspend the render unless the phase is explicitly a validated-reach execution phase. The
-    integration runtime maps the controller phase through this each tick to drive
-    ``set_render_suspended(not sensing_render_required(phase))``."""
-    return str(phase) not in _SENSING_SUSPEND_PHASES
+#: Controller phases whose decode-camera render is unused (the OBSERVE-THEN-EXECUTE lock + the held
+#: cart-swing chain). The authoritative set and the predicate live in the pure zero-dependency leaf
+#: ``capture_phases`` so every consumer agrees -- the sensing-render gate / ``controller.in_capture_
+#: silent_window`` here AND the separate-process station-liveness node (``restock_host.incorporation_
+#: ack``) that scopes the capture-silent parked-heartbeat suspension without a numpy import. Re-exported
+#: under the historical names so existing imports (and tests) are unchanged.
+from .capture_phases import (  # noqa: F401  (re-exported for backward-compatible imports)
+    CAPTURE_SILENT_PHASES as _SENSING_SUSPEND_PHASES,
+    sensing_render_required,
+)
 
 
 def _reject_unsynced(gate, **values):

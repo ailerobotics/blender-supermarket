@@ -13,6 +13,7 @@ from unittest import mock
 from twin.restock.host_pacing_harness import (
     FakeClockPair, simulate_sim_primary_budget, simulate_station_heartbeat,
     simulate_far_station_paused, simulate_loaded_collect_heartbeat_read_lag,
+    simulate_capture_silent_station_suspend,
 )
 from twin.restock_manipulation import ros_adapter
 from twin.restock_manipulation.ros_adapter import (
@@ -285,6 +286,54 @@ class LoadedCollectHeartbeatReadLag(unittest.TestCase):
         r = simulate_loaded_collect_heartbeat_read_lag(
             pacing=1.0, sim_gap_budget=0.5, wall_floor=3.0, read_lag_sim=0.0, op_sim=10.0)
         self.assertEqual(r['outcome'], 'survived', r)
+
+
+class CaptureSilentStationHeartbeatSuspend(unittest.TestCase):
+    """sim-retreat-station-heartbeat-scope-v1: the parked-station SIM-gap guard counts the CAPTURE-SILENT
+    retreat/stow window, where the mission executes a long silent arm leg and sends no station heartbeat
+    (coldwin81: a ~98 sim-s empty retreat whose first trajectory segment unwinds wrist_2 ~1.33 rad at
+    ~0.013 rad/s). With the 60 s SIM-gap budget that false-trips a healthy run ('parked heartbeat lost:
+    sim gap 60.02 s'). The opt-in key suspends ONLY the SIM leg over the window and re-arms it on the next
+    capture-bearing phase; the frozen-sim WALL backstop stays armed. Drives the REAL IncorporationAckState."""
+
+    # The cw82 stopgap window (the value the hardening-run fragment restores to 60) and the cw81 retreat.
+    SIM_GAP, WALL_FLOOR = 60.0, 30.0
+    RETREAT_SIM = 98.0                 # the coldwin81 retreat duration, well past the 60 s SIM-gap budget
+
+    def test_key_on_survives_the_98s_capture_silent_retreat(self):
+        # With the key on, the ~98 sim-s retreat (stretched to 98 x pacing WALL s) never trips, and the
+        # guard re-arms cleanly on the verify re-entry (no stale accumulated gap on resume).
+        for pacing in PACINGS:
+            r = simulate_capture_silent_station_suspend(
+                pacing=pacing, sim_gap_budget=self.SIM_GAP, wall_floor=self.WALL_FLOOR,
+                retreat_sim=self.RETREAT_SIM, suspend=True)
+            self.assertEqual(r['outcome'], 'survived', (pacing, r))
+            self.assertTrue(r['suspended_entry'], (pacing, r))
+            self.assertTrue(r['rearmed_exit'], (pacing, r))
+            self.assertEqual(r['reason'], '', (pacing, r))
+
+    def test_key_off_still_trips_by_name_the_known_cw81_fault(self):
+        # The pre-fix contrast (key off): the SIM gap still trips, bounded at ~the 60 s budget, named --
+        # the exact coldwin81 'parked heartbeat lost: sim gap' the fix suppresses for a healthy retreat.
+        for pacing in PACINGS:
+            r = simulate_capture_silent_station_suspend(
+                pacing=pacing, sim_gap_budget=self.SIM_GAP, wall_floor=self.WALL_FLOOR,
+                retreat_sim=self.RETREAT_SIM, suspend=False)
+            self.assertEqual(r['outcome'], 'tripped_sim', (pacing, r))
+            self.assertIn('parked heartbeat lost: sim gap', r['reason'], (pacing, r))
+            self.assertFalse(r['suspended_entry'], (pacing, r))
+            self.assertLessEqual(r['sim'], self.SIM_GAP + 1.0, (pacing, r))
+
+    def test_suspended_but_frozen_sim_still_caught_on_wall_backstop(self):
+        # The WALL backstop stays armed even while suspended: a genuinely frozen simulator inside the
+        # capture-silent window (sim never advances, the window never ends) is still caught by name on the
+        # derived frozen-sim WALL backstop (60 s x 50 = 3000 s).
+        r = simulate_capture_silent_station_suspend(
+            pacing=16.0, sim_gap_budget=self.SIM_GAP, wall_floor=self.WALL_FLOOR,
+            retreat_sim=1e9, suspend=True, frozen=True)
+        self.assertEqual(r['outcome'], 'tripped_wall', r)
+        self.assertIn('wall gap', r['reason'], r)
+        self.assertIn('capture-silent', r['reason'], r)
 
 
 if __name__ == '__main__':
