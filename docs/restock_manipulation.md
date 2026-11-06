@@ -520,6 +520,35 @@ trigger. The 2.0° bound is untouched. Recommended ON values + acceptance:
 `docs/examples/place-release-on-contact-fragment.json`; CPU proof (each trigger, the obstruction gate, the
 coldwin68/coldwin64 replays): `scripts/twin/tests/test_place_release_on_contact_v1.py`.
 
+### Completing the release when the place-cancel never terminates (sim-place-release-cancel-handshake-v1)
+
+When the contact-gated release fires mid place-descent, the release phase must **stop** the in-flight place
+motion and reach a **terminal, settled** result before it detaches (PR 334 serialization — never detach into
+an in-flight planning scene). The default path **cancels** the place `ExecuteTrajectory` (`motion.cancel`).
+coldwin74/75 both reached the set-down and fired `PLACE_CONTACT_RELEASE trigger=stall`, but the place descent
+is a **driven trajectory on the sim `FollowJointTrajectory` executor**, and that action cancel is **both**
+dropped in the goal-accept race (`self.handle is None` at the stall, so `cancel_goal_async` never goes out —
+cw75 `host-stack.log` the cancel at sim 245.600 while the goal is still being accepted / `TRAJ_HOST_START` at
+246.217) **and** unsafe (the sim `trajectory_host` treats a goal cancel as a **fault** that latches the global
+`/manipulation/stop`). `cancel_outcome()` stayed `None` the whole budget (cw74 2.0 s, cw75 8.0 s) and
+`HOST_FAULT_ESTOP phase=release` fired with the carton still welded on the shelf.
+
+The fix (HOST `carton_level.release_cancel_handshake`, opt-in, default off ⇒ the legacy `motion.cancel` path,
+byte-identical) stops the descent on its **own channel**: the release phase emits the **contact-hold** control
+(`/restock_sim/arm_contact=True`) so `trajectory_host` **succeeds holding the current pose** (terminal, no
+fault, no global stop) and marks the port cancel-requested via `settle_in_place()` (no `cancel_goal_async`),
+so `cancel_outcome()` reads the resolved execute future → `succeeded` → gripper-open + detach from the settled
+pose. As a belt-and-braces **stopped-arm fallback**, if the terminal still never arrives but the arm is
+**provably stopped** — the measured max joint speed (finite difference of `sensors.joint_positions`) stays ≤
+`release_cancel_stopped_vel` (default 0.02 rad/s) for `release_cancel_stopped_ticks` (default 3) consecutive
+ticks — the release logs `RELEASE_CANCEL_STOPPED_FALLBACK`, forces the port terminal (`force_terminal_settled`,
+no e-stop) and detaches. It **never detaches into a moving arm**: a joint still advancing above the threshold
+resets the tick count, and if neither the terminal nor the stopped-arm proof lands within the budget the
+release still fails fast by name. Recommended ON values + acceptance:
+`docs/examples/place-release-cancel-handshake-fragment.json`; CPU proof (the adapter `settle_in_place` /
+`force_terminal_settled` contract, the hold-and-settle, the stopped-arm fallback, a moving arm never
+detaching, and a cw75-trace replay OFF/ON): `scripts/twin/tests/test_place_release_cancel_handshake_v1.py`.
+
 ## Place-on-cart between-posts target (sim-place-target-between-posts-v1)
 
 The collect place-on-cart load-centre on the rollwagen **upper shelf** is moved from the old
