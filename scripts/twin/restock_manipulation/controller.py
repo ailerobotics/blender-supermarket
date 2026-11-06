@@ -812,6 +812,17 @@ class TransferController:
         # this is a safety backstop, not a primary terminator.
         self.release_cancel_timeout_s = _float_env_bounded(
             'RESTOCK_RELEASE_CANCEL_SETTLE_S', min(2.0, float(phase_timeout)), 0.1, float(phase_timeout))
+        # sim-release-open-reissue-v1: the opt-in release-open RE-ISSUE gate (coldwin84 lost the one-shot
+        # gripper-open on the last-value relay -> the weld never released). Built only when
+        # carton_level.release_reissue is on => off => None => byte-identical. The confirm window is clamped
+        # under the per-phase timeout so it stays a tighter bound.
+        self._release_reissue = None
+        if self._carton_level is not None and getattr(self._carton_level, 'release_reissue', False):
+            from . import release_reissue as _release_reissue_mod
+            self._release_reissue = _release_reissue_mod.ReleaseReissueGate(
+                confirm_timeout_s=min(float(self._carton_level.release_confirm_timeout_s),
+                                      float(phase_timeout)),
+                log_every=int(self._carton_level.release_reissue_log_every))
         # sim-robust-phase-timeout-during-recovery-v1: credit the per-phase timeout clock for the sim time
         # spent while the motion adapter is inside a NAMED move_group crash recovery (respawn hold /
         # post-respawn re-attach / an observed move_group death still being recovered -- motion.
@@ -3869,6 +3880,48 @@ class TransferController:
                     require_fresh(s.valid_until_steady,self.steady_clock)
                 self.issued = True
                 self.release_time = now
+                # sim-release-open-reissue-v1: arm the re-issue window at the FIRST gripper-open (not at
+                # controller construction), so the bounded confirm budget starts here. No-op when off.
+                if self._release_reissue is not None:
+                    self._release_reissue.reset(now)
+                return self._result(({'kind': 'gripper', 'enabled': False},))
+            # sim-release-open-reissue-v1 (coldwin84): the gripper-open control is a ONE-SHOT, and coldwin84
+            # lost the single open on the last-value /manipulation/status relay (0 Isaac-side command:open)
+            # so the SIM_ATTACH weld never released and the run e-stopped. When on, RE-EMIT the gripper-open
+            # -- which on the Isaac side is BOTH open AND the weld detach (cad_tool.command(False) ->
+            # open_gripper + _release_fallback) -- EVERY tick until the per-tick feedback confirms gripper
+            # open + carton not held (seal released), then proceed to the cuMotion detach; fail by name if
+            # unconfirmed within the bounded sim window. Off => the legacy single-shot path below =>
+            # byte-identical. The cuMotion planning-scene detach (update_payload) is the post-confirmation
+            # 'proceed' step -- issued ONCE from the confirmed-released state, never per tick.
+            if self._release_reissue is not None:
+                dec = self._release_reissue.observe(
+                    now=now, held=s.contact, gripper_enabled=s.gripper_enabled,
+                    gripper_status_time=s.gripper_status_time)
+                if dec.log is not None:
+                    print(dec.log, flush=True)
+                if dec.action == 'confirmed':
+                    self.held = False
+                    if not self.motion.update_payload(False, self.profile):
+                        return self._fail('payload collision detachment not acknowledged')
+                    print('RELEASE_CONFIRMED phase=release now=%.3f ticks=%d elapsed=%.2fs held=%s '
+                          'gripper_open=%s status_fresh=%s (seal released -> cuMotion detach)'
+                          % (now, dec.ticks, dec.elapsed_s, dec.held, dec.gripper_open,
+                             dec.gripper_status_fresh), flush=True)
+                    self.evidence.append({'release_confirmed': {
+                        'sim_time': float(now), 'ticks': int(dec.ticks), 'elapsed_s': float(dec.elapsed_s)}})
+                    self._transition('retreat')
+                    return self._result()
+                if dec.action == 'timeout':
+                    return self._fail('RELEASE_NOT_CONFIRMED: gripper-open + weld-detach re-issued every '
+                                      'tick for %d tick(s) / %.2fs sim but the feedback never confirmed '
+                                      'gripper open + carton not held (held=%s gripper_open=%s '
+                                      'status_fresh=%s); not restarting the stage with the carton welded'
+                                      % (dec.ticks, dec.elapsed_s, dec.held, dec.gripper_open,
+                                         dec.gripper_status_fresh))
+                # Still held: re-emit the gripper-open + weld-detach control this tick (resilient to the
+                # last-value relay drop). No require_fresh (the first open validated the registration;
+                # mirrors contact_reissue_suction_each_tick, which re-publishes without re-validating).
                 return self._result(({'kind': 'gripper', 'enabled': False},))
             if not s.contact:
                 self.held = False
