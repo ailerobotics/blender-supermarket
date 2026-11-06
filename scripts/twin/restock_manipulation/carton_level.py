@@ -725,6 +725,25 @@ class LevelConfig:
     release_cancel_handshake: bool = False
     release_cancel_stopped_vel: float = 0.02       # rad/s: max measured joint speed that counts as stopped
     release_cancel_stopped_ticks: int = 3          # consecutive stopped ticks before the fallback proceeds
+    # sim-release-open-reissue-v1 (coldwin84): the gripper-open that releases the weld at the end of the
+    # release phase is a ONE-SHOT control. coldwin84 (a byte-identical re-run of the clean coldwin83) lost
+    # that single open on the LAST-VALUE /manipulation/status relay -- the Isaac side ran ZERO
+    # ``cad_tool.command(open)`` (0 ``SEAL_DIAG command:open``; the next no-control release tick's higher
+    # ``sequence`` overwrote the open-carrying status before ``IsaacRosGraph.poll`` read it) -- so the weld
+    # stayed engaged and the run e-stopped (``release did not detach ... within 8.0s``). Five earlier runs
+    # on the identical config released cleanly: the release was a dice roll on relay timing. With
+    # ``release_reissue`` on, the release phase RE-EMITS the gripper-open control (which on the Isaac side
+    # is BOTH the open AND the ``SIM_ATTACH_FALLBACK`` weld detach) on EVERY tick until the per-tick
+    # feedback (``RESTOCK_CONTACT_STATUS_FEEDBACK`` / PR 358: ``gripper_enabled`` + ``gripper_status_time``
+    # + the ``s.contact`` latch) confirms the gripper OPEN and the carton NOT held (seal released), then
+    # proceeds to the cuMotion detach; if unconfirmed within ``release_confirm_timeout_s`` sim it FAILS BY
+    # NAME (``RELEASE_NOT_CONFIRMED``) -- never restarting the stage with the carton welded. The SAME
+    # one-shot-resilience PR 356 gave the contact ENABLE (``contact_reissue_suction_each_tick``). Default
+    # off => the single-shot open + the 8 s ``release_detach_timeout_s`` path => byte-identical. See
+    # ``release_reissue.ReleaseReissueGate`` + docs/examples/release-open-reissue-fragment.json.
+    release_reissue: bool = False
+    release_confirm_timeout_s: float = 8.0         # sim seconds: bounded window for the release to confirm
+    release_reissue_log_every: int = 30            # emit one RELEASE_REISSUE line per this many ticks
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -791,6 +810,15 @@ class LevelConfig:
                 and float(self.place_release_contact_gap_mm) > 0):
             raise ValueError('carton_level.place_release_contact_gap_mm must be None or a finite positive '
                              'number of millimetres (the support-contact seal-gap release trigger)')
+        # sim-release-open-reissue-v1
+        if not (math.isfinite(float(self.release_confirm_timeout_s)) and float(self.release_confirm_timeout_s) > 0):
+            raise ValueError('carton_level.release_confirm_timeout_s must be a finite positive number of '
+                             'sim seconds (the bounded window for the re-issued release to confirm)')
+        if isinstance(self.release_reissue_log_every, bool) \
+                or not isinstance(self.release_reissue_log_every, int) \
+                or self.release_reissue_log_every < 1:
+            raise ValueError('carton_level.release_reissue_log_every must be a positive integer '
+                             '(RELEASE_REISSUE is logged once per this many ticks)')
         if (isinstance(self.place_support_tokens, str) or not hasattr(self.place_support_tokens, '__iter__')
                 or not tuple(self.place_support_tokens)
                 or not all(isinstance(t, str) and t for t in self.place_support_tokens)):
@@ -886,16 +914,16 @@ def resolve_level_config(spec):
                  'preplace_above_support', 'preplace_level_gate', 'preplace_reaction_branch',
                  'preplace_seeded_interior', 'preplace_branch_prefer_carry_connected',
                  'preplace_descent_feasible',
-                 'place_release_on_contact', 'release_cancel_handshake'):
+                 'place_release_on_contact', 'release_cancel_handshake', 'release_reissue'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
-    # sim-place-release-on-contact-v1 / sim-place-release-cancel-handshake-v1
+    # sim-place-release-on-contact-v1 / sim-place-release-cancel-handshake-v1 / sim-release-open-reissue-v1
     for fnum in ('place_release_effort_margin_nm', 'place_release_stall_m', 'place_obstruction_gap_mm',
-                 'place_reapproach_shift_m', 'release_cancel_stopped_vel'):
+                 'place_reapproach_shift_m', 'release_cancel_stopped_vel', 'release_confirm_timeout_s'):
         if spec.get(fnum) is not None:
             kw[fnum] = float(spec[fnum])
     for fint in ('place_release_effort_consecutive', 'place_release_stall_ticks', 'place_reapproach_max',
-                 'release_cancel_stopped_ticks'):
+                 'release_cancel_stopped_ticks', 'release_reissue_log_every'):
         if spec.get(fint) is not None:
             kw[fint] = int(spec[fint])
     if spec.get('place_release_contact_gap_mm') is not None:
