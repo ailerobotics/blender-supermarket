@@ -155,5 +155,6 @@
  "contact_seal_diag_dwell_ticks": 5,
  "contact_seal_diag_max_gap_mm": 0.5,
  "contact_seal_diag_max_angle_deg": 1.0,
- "preplace_pan_first": true
+ "preplace_pan_first": true,
+ "capture_silent_sensor_watchdog_suspend": true
 }
