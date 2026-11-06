@@ -367,6 +367,19 @@ def check_carton_level(host_cfg):
             "OFF: the carry-connected preference is the reaction-branch selector's branch rule, so with the "
             "reaction branch off it is silently inert. Set 'preplace_reaction_branch': true (with "
             "'preplace_level_gate' and 'preplace_above_support') so the carry-connected standoff is chosen.")
+    # sim-preplace-branch-descent-feasible-v1: the place-descent feasibility filter lives INSIDE the
+    # carry-connected selector (it discards candidate standoffs whose place descent exceeds the bound), so it
+    # is driven only when 'preplace_branch_prefer_carry_connected' is on. ON without it is silently inert
+    # (the same key-in-the-wrong-place class), so refuse it loudly rather than ship a run that believes it
+    # filtered descent-infeasible standoffs while it drove the min-|wrist_2| or single level_place_ik standoff.
+    if getattr(resolved, 'preplace_descent_feasible', False) \
+            and not getattr(resolved, 'preplace_branch_prefer_carry_connected', False):
+        problems.append(
+            "carton_level 'preplace_descent_feasible' is ON but 'preplace_branch_prefer_carry_connected' is "
+            "OFF: the place-descent feasibility filter is part of the carry-connected standoff selector, so "
+            "with that selector off it is silently inert. Set 'preplace_branch_prefer_carry_connected': true "
+            "(with 'preplace_reaction_branch', 'preplace_level_gate' and 'preplace_above_support') so the "
+            "descent-infeasible standoffs are discarded.")
     return problems
 
 

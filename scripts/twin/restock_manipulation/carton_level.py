@@ -631,6 +631,28 @@ class LevelConfig:
     # <= bound_deg) -- the gate stays the authority. Default OFF => the min-|wrist_2| settling branch is used
     # (byte-identical). Requires preplace_reaction_branch (it is that selector's branch rule).
     preplace_branch_prefer_carry_connected: bool = False
+    # sim-preplace-branch-descent-feasible-v1: the carry-connected standoff selector must choose only among
+    # standoffs whose PLACE DESCENT is ALSO within the carton-level bound, not just among those whose leg-2
+    # continuity gate accepts (coldwin79). The selector (``select_carry_connected_standoff``) ranked candidate
+    # standoffs only by carry travel + the leg-2 continuity gate and greedily returned the FIRST leg-2-accepted
+    # branch; it NEVER evaluated whether the later place descent FROM that standoff keeps the carton level. The
+    # candidate set and each branch's leg-2 continuity result depend on the run's measured carry pose / sensed
+    # place target (which vary a few mm / mrad run-to-run), so different runs greedily accept different
+    # low-carry-travel branches: coldwin76/77/78 happened to accept a ~0.59 wrist_2 branch whose place descent
+    # is level (~1.8 deg), but coldwin79 accepted the low wrist_2=0.052 branch whose descent would roll
+    # 3.43 deg (> the 2.0 bound), so the CARTON_LEVEL_PLACE_DESCENT gate refused it BEFORE motion and the run
+    # e-stopped -- making the set-down a lottery between runs. With ``preplace_descent_feasible`` on, the
+    # controller passes the selector a ``descent_predictor`` (the SAME ``plan_compensated_place_descent`` the
+    # place-descent gate runs, from each CANDIDATE standoff to the resolved support), the selector DISCARDS any
+    # candidate whose predicted descent exceeds ``bound_deg``, and -- among the leg-2-accepted AND
+    # descent-feasible branches -- chooses DETERMINISTICALLY by the stable key (least carry travel, then
+    # smallest predicted descent tilt, then smallest leg-2 max wrist step, then wrist_2 closest to the carry
+    # value), independent of the search time / candidate-enumeration order. The carry-travel-primary key (NOT
+    # the smallest-descent-tilt-primary the brief sketched) is what preserves the carry-connected design AND
+    # keeps coldwin76's choice unchanged while discarding coldwin79's infeasible branch. Requires
+    # ``preplace_branch_prefer_carry_connected`` (it extends that selector's ranking). Default OFF => the
+    # selector takes no ``descent_predictor`` => byte-identical. The 2.0 deg bound is UNTOUCHED.
+    preplace_descent_feasible: bool = False
     # sim-preplace-branch-select-bounded-v1: CPU time-box (seconds) for the reaction-branch standoff
     # search (``select_reaction_natural_standoff``). The search is pure CPU and now cheap (~0.08 s on the
     # coldwin57 fixture), so this is a safety net: a search still running after the budget REFUSES the
@@ -863,6 +885,7 @@ def resolve_level_config(spec):
                  'closed_loop_level', 'place_contact_release', 'closed_loop_sensor',
                  'preplace_above_support', 'preplace_level_gate', 'preplace_reaction_branch',
                  'preplace_seeded_interior', 'preplace_branch_prefer_carry_connected',
+                 'preplace_descent_feasible',
                  'place_release_on_contact', 'release_cancel_handshake'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
@@ -2797,7 +2820,7 @@ def select_carry_connected_standoff(robot, target_pos, up_in_tool, seed_config, 
                                     bound_deg=DEFAULT_TILT_BOUND_DEG,
                                     max_wrist_step_rad=DEFAULT_MAX_WRIST_STEP_RAD,
                                     seeded_interior=False, level_accept_deg=None, effort_limit=56.0,
-                                    budget_s=None, clock=None, fast=True):
+                                    descent_predictor=None, budget_s=None, clock=None, fast=True):
     """Choose the pre-place standoff on the branch CONNECTED to the carry/tucked shape, so the PAN-FIRST
     leg 2 (carry -> standoff) is a monotonic extension the continuity gate accepts
     (sim-preplace-pan-first-seeded-leg2-v1, the coldwin72 fix).
@@ -2822,12 +2845,29 @@ def select_carry_connected_standoff(robot, target_pos, up_in_tool, seed_config, 
     end. The gate stays the authority; a branch whose leg-2 gate rejects is skipped. ``budget_s`` time-boxes
     the search on ``clock`` (default ``time.perf_counter``) as in :func:`select_reaction_natural_standoff`.
 
+    sim-preplace-branch-descent-feasible-v1 (coldwin79) -- ``descent_predictor``. The leg-2 continuity gate
+    alone is NOT sufficient: a branch whose leg 2 is monotonic can still have a PLACE DESCENT (standoff ->
+    support) that rolls the carton past ``bound_deg``, which the later CARTON_LEVEL_PLACE_DESCENT gate refuses
+    BEFORE motion -- so the run e-stops (coldwin79 accepted the low wrist_2=0.052 branch whose descent rolls
+    3.43 deg). When ``descent_predictor`` is supplied (a callable ``standoff_map -> predicted descent tilt
+    deg``, the SAME ``plan_compensated_place_descent`` the place gate runs, raising ValueError / returning a
+    non-finite value when the descent has no in-limits level solution), the selector evaluates the predicted
+    place-descent tilt for every leg-2-accepted candidate, DISCARDS any whose descent exceeds ``bound_deg``,
+    and chooses DETERMINISTICALLY by the stable key ``(carry_travel, descent_tilt, leg2_max_wrist_step,
+    |wrist_2 - carry_wrist_2|)`` -- least carry travel first (so the choice preserves the carry-connected
+    design AND stays identical on a run whose greedy branch was already descent-feasible), then the remaining
+    fields break any degenerate carry-travel tie. The ranking is independent of the search time / candidate
+    enumeration order. ``descent_predictor=None`` => the legacy greedy first-leg-2-accepted choice, with no
+    descent evaluation => byte-identical.
+
     Returns ``(standoff_map, report)`` with ``report['reason'] = 'carry-connected'`` plus
     ``chosen_wrist_2``, ``carry_wrist_travel``, ``leg2_max_wrist_step``, ``leg2_max_tilt_deg``,
     ``chosen_peak_torque_nm`` / ``chosen_peak_joint`` / ``chosen_margin_nm`` (for the log), ``branches``
-    (ranked), ``effort_limit_nm``, ``select_seconds``. Raises ValueError when no carry-connected branch
-    yields a gate-accepted leg-2 (the caller falls back to the single ``level_place_ik`` standoff / fails
-    honestly). Pure/CPU."""
+    (ranked; each carries ``descent_tilt_deg`` + ``descent_ok`` when a ``descent_predictor`` was used),
+    ``descent_feasible_gate`` (bool: whether the descent filter ran), ``chosen_descent_tilt_deg``,
+    ``effort_limit_nm``, ``select_seconds``. Raises ValueError when no carry-connected branch yields a
+    gate-accepted leg-2 (and, with a ``descent_predictor``, a descent-feasible one); the caller falls back to
+    the single ``level_place_ik`` standoff / fails honestly. Pure/CPU."""
     if clock is None:
         clock = time.perf_counter
     t0 = clock()
@@ -2851,51 +2891,118 @@ def select_carry_connected_standoff(robot, target_pos, up_in_tool, seed_config, 
     def _travel(std):
         return sum(abs(_wrap(float(std[j]) - float(carry[j]))) for j in lj if j in std)
 
-    ranked = sorted(branches, key=_travel)
+    # sim-preplace-branch-descent-feasible-v1: when a descent_predictor is given, sort by a FULLY
+    # DETERMINISTIC key so the ranking never depends on the enumerate's dict/set order (the legacy single
+    # ``_travel`` key leaves equal-travel ties to the enumeration order). The off path keeps ``_travel`` alone
+    # so it is byte-identical.
+    carry_w2 = float(carry.get('ur_wrist_2_joint', 0.0))
+
+    def _w3(std):
+        return round(_wrap(float(std.get('ur_wrist_3_joint', 0.0))), 6)
+
+    if descent_predictor is not None:
+        ranked = sorted(branches, key=lambda std: (round(_travel(std), 9),
+                                                   round(_wrap(float(std.get('ur_wrist_2_joint', 0.0))), 6),
+                                                   _w3(std)))
+    else:
+        ranked = sorted(branches, key=_travel)
     anchor = 'seeded' if seeded_interior else 'auto'
     lacc = level_accept_deg if seeded_interior else None
     report_branches = []
     chosen = chosen_plan = None
-    # Validate the leg-2 gate of the CLOSEST (least carry travel) branches first and STOP at the first the
-    # gate accepts -- the carry-connected branch is by construction a near branch, so this is ~one leg-2
-    # plan on the healthy path. Bound the validations (``_CARRY_CONNECTED_MAX_VALIDATE``) so a pathological
-    # input cannot run the expensive seeded plan over every far (high-travel, heavily densified) branch and
-    # blow the heartbeat budget; the far 0.668-family branches rank last and are never reached on the
-    # healthy path.
+    chosen_descent = None
+    # The chosen candidate's stable-key tuple (with a descent_predictor): (carry_travel, descent_tilt,
+    # leg2_max_wrist_step, |wrist_2 - carry_wrist_2|). Least carry travel first, so the choice stays identical
+    # when the run's greedy branch was already descent-feasible, and the remaining fields break a degenerate
+    # carry-travel tie deterministically.
+    chosen_key = None
+    # Validate the leg-2 gate of the CLOSEST (least carry travel) branches first. WITHOUT a descent_predictor
+    # (byte-identical legacy path) STOP at the first the gate accepts -- the carry-connected branch is by
+    # construction a near branch, so this is ~one leg-2 plan on the healthy path. WITH a descent_predictor,
+    # also evaluate the place descent from each leg-2-accepted candidate and keep walking only while a later
+    # candidate could still beat the best feasible one (travel <= the best feasible travel): once a candidate's
+    # travel exceeds the best feasible travel it can never win the carry-travel-primary key, so the walk stops
+    # (early exit) -- cost ~the same as the legacy first-accepted on the healthy path. Bound the validations
+    # (``_CARRY_CONNECTED_MAX_VALIDATE``) so a pathological input cannot run the expensive seeded plan over
+    # every far (high-travel, heavily densified) branch and blow the heartbeat budget.
     for std in ranked[:_CARRY_CONNECTED_MAX_VALIDATE]:
         _tick()
+        travel = _travel(std)
+        if (descent_predictor is not None and chosen is not None
+                and travel > float(chosen_key[0]) + 1e-9):
+            break   # no later (higher-travel) candidate can beat the carry-travel-primary key
         # leg-2 start: the carry tucked wrists/lift/elbow at THIS branch's shoulder_pan (the leg-1 end --
         # pan-first leg 1 holds the carry shape and sweeps shoulder_pan to the standoff pan).
         start = dict(carry)
         start['ur_shoulder_pan_joint'] = float(std['ur_shoulder_pan_joint'])
-        travel = _travel(std)
+        rec = {'wrist_2': float(std.get('ur_wrist_2_joint', 0.0)), 'carry_wrist_travel': travel,
+               'leg2_max_wrist_step': None, 'leg2_max_tilt_deg': None, 'accepted': False, 'chosen': False}
+        if descent_predictor is not None:
+            rec['descent_tilt_deg'] = None
+            rec['descent_ok'] = None
         try:
             plan = plan_level_world_approach(
                 robot, start, std, up_in_tool, level_joints=level_joints, tool_link=tool_link, root=root,
                 limits=limits, bound_deg=bound_deg, max_segment_rad=max_segment_rad, base_R=base_R,
                 max_wrist_step_rad=max_wrist_step_rad, anchor=anchor, fast=fast, level_accept_deg=lacc)
         except ValueError:
-            report_branches.append({'wrist_2': float(std.get('ur_wrist_2_joint', 0.0)),
-                                    'carry_wrist_travel': travel, 'leg2_max_wrist_step': None,
-                                    'leg2_max_tilt_deg': None, 'accepted': False, 'chosen': False})
+            report_branches.append(rec)
             continue
         step_ok = plan.reject_wrist_step(max_wrist_step_rad, level_joints=level_joints) is None
         tilt_ok = plan.reject(bound_deg) is None
-        accepted = step_ok and tilt_ok
-        report_branches.append({'wrist_2': float(std.get('ur_wrist_2_joint', 0.0)),
-                                'carry_wrist_travel': travel,
-                                'leg2_max_wrist_step': float(plan.max_wrist_step),
-                                'leg2_max_tilt_deg': float(max(plan.max_roll, plan.max_pitch)),
-                                'accepted': accepted, 'chosen': accepted})
-        if accepted:
-            chosen = std
-            chosen_plan = plan
-            break
+        leg2_accepted = step_ok and tilt_ok
+        leg2_step = float(plan.max_wrist_step)
+        rec['leg2_max_wrist_step'] = leg2_step
+        rec['leg2_max_tilt_deg'] = float(max(plan.max_roll, plan.max_pitch))
+        rec['accepted'] = leg2_accepted
+        if descent_predictor is None:
+            report_branches.append(rec)
+            if leg2_accepted:
+                rec['chosen'] = True
+                chosen = std
+                chosen_plan = plan
+                break
+            continue
+        # --- descent-feasibility filter (sim-preplace-branch-descent-feasible-v1) ---
+        descent_tilt = None
+        descent_ok = False
+        if leg2_accepted:
+            _tick()
+            try:
+                dt = descent_predictor(std)
+                descent_tilt = float(dt)
+                descent_ok = math.isfinite(descent_tilt) and descent_tilt <= float(bound_deg) + 1e-9
+            except (ValueError, KeyError):
+                descent_tilt = None   # no in-limits level descent from this standoff -> infeasible
+                descent_ok = False
+        rec['descent_tilt_deg'] = descent_tilt
+        rec['descent_ok'] = descent_ok
+        report_branches.append(rec)
+        if leg2_accepted and descent_ok:
+            key = (round(travel, 9), round(descent_tilt, 6), round(leg2_step, 6),
+                   round(abs(_wrap(float(std.get('ur_wrist_2_joint', 0.0)) - carry_w2)), 6))
+            if chosen_key is None or key < chosen_key:
+                chosen_key = key
+                chosen = std
+                chosen_plan = plan
+                chosen_descent = descent_tilt
     if chosen is None:
+        if descent_predictor is not None:
+            n_leg2 = sum(1 for b in report_branches if b.get('accepted'))
+            raise ValueError('no carry-connected standoff branch whose pan-first leg-2 the continuity gate '
+                             'accepts AND whose place descent stays within the %.2f deg bound; ranked %d '
+                             'reach+level branches, validated %d (%d leg-2-accepted, all descent-infeasible)'
+                             % (float(bound_deg), len(ranked), len(report_branches), n_leg2))
         raise ValueError('no carry-connected standoff branch whose pan-first leg-2 approach the continuity '
                          'gate accepts (step <= %.3f rad AND tilt <= %.2f deg); ranked %d reach+level '
                          'branches, validated %d' % (float(max_wrist_step_rad), float(bound_deg),
                                                      len(ranked), len(report_branches)))
+    # mark the chosen branch in the ranked report (descent path only; the legacy path marked it inline at the
+    # break to stay byte-identical)
+    if descent_predictor is not None:
+        for b in report_branches:
+            b['chosen'] = (b['carry_wrist_travel'] == _travel(chosen)
+                           and b['wrist_2'] == float(chosen.get('ur_wrist_2_joint', 0.0)))
     # torque for the chosen (reported only, like the min-|wrist_2| selector)
     chosen_start = dict(carry)
     chosen_start['ur_shoulder_pan_joint'] = float(chosen['ur_shoulder_pan_joint'])
@@ -2908,6 +3015,8 @@ def select_carry_connected_standoff(robot, target_pos, up_in_tool, seed_config, 
               'leg2_max_tilt_deg': float(max(chosen_plan.max_roll, chosen_plan.max_pitch)),
               'chosen_peak_torque_nm': peak, 'chosen_peak_joint': pj,
               'chosen_margin_nm': float(effort_limit) - peak, 'effort_limit_nm': float(effort_limit),
+              'descent_feasible_gate': descent_predictor is not None,
+              'chosen_descent_tilt_deg': chosen_descent,
               'select_seconds': clock() - t0, 'full_plan': False}
     return dict(chosen), report
 

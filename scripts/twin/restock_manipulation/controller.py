@@ -1751,6 +1751,48 @@ class TransferController:
             return goal
         return tuple(float(leveled[j]) for j in ARM_JOINTS)
 
+    def _preplace_descent_predictor(self, robot, measured, tcp_link, limits):
+        """sim-preplace-branch-descent-feasible-v1 (coldwin79): a callable the carry-connected standoff
+        selector uses to evaluate each CANDIDATE standoff's PLACE DESCENT level feasibility -- the SAME
+        ``plan_compensated_place_descent`` the place-descent gate (CARTON_LEVEL_PLACE_DESCENT) runs at the
+        place phase, just started from the candidate standoff instead of the measured arrival. Returns the
+        predicted peak executed tilt (deg) ``max(max_roll, max_pitch)`` for a candidate standoff joint map,
+        raising ValueError when the descent has no in-limits level solution (the selector treats that as
+        descent-infeasible). Returns ``None`` (the selector then skips the descent filter => byte-identical)
+        when the feature is off, there is no resolved place pose, or the carton up-axis was not captured.
+
+        The arguments mirror the place-phase gate exactly (``_collect_deck_place`` / ``_level_place_goal``):
+        the resolved support TCP ``poses['place']`` as the target, the leveled fixed pre-place shape as the
+        IK seed, the base-frame carton up-axis, the default loaded gravity compensation, and the same
+        from-above / clearance / depth-bias / waypoint-count place-descent options -- so a candidate the
+        selector accepts here is one the place gate also accepts, and one it discards is one the gate would
+        have refused before motion."""
+        cl_cfg = self._carton_level
+        if (cl_cfg is None or not getattr(cl_cfg, 'preplace_descent_feasible', False)
+                or 'place' not in self.poses or self._carton_up_in_tool is None):
+            return None
+        from twin.restock_manipulation import carton_level as cl
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        place_tcp = tuple(float(c) for c in self.poses['place'][:3])
+        gc = self._place_gravity_compensation()
+        # the descent IK seed = the leveled fixed pre-place shape (the exact seed the place gate passes),
+        # computed once per select (not per candidate).
+        seed = list(self._level_place_goal(self.collect_place_preplace_shape, measured))
+        up_in_tool = self._carton_up_in_tool
+
+        def _descent_tilt(std_map):
+            std_vec = [float(std_map[j]) for j in ARM_JOINTS]
+            plan = cl.plan_compensated_place_descent(
+                robot, std_vec, place_tcp, list(seed), up_in_tool, gc,
+                bound_deg=cl_cfg.bound_deg, tool_link=tcp_link, limits=limits,
+                waypoints=cl_cfg.path_waypoints,
+                approach_from_above=cl_cfg.place_from_above,
+                above_clearance_m=cl_cfg.place_above_clearance_m,
+                depth_bias_m=cl_cfg.place_depth_bias_m)
+            return max(plan.max_roll, plan.max_pitch)
+
+        return _descent_tilt
+
     def _preplace_branch_select_key(self, standoff, measured, tcp_link, limits):
         """An exact-match signature of every input the reaction-branch standoff select depends on, so the
         per-operation memo (``_preplace_branch_cache``) is reused only when the inputs are identical --
@@ -1856,6 +1898,12 @@ class TransferController:
                             # a monotonic extension the continuity gate accepts -- NOT the min-|wrist_2| 0.668
                             # branch, which sits on a different level basin the leg-2 wrist_2 cannot reach in
                             # <= 0.15 rad steps at the standoff pan (coldwin72). The gate stays the authority.
+                            # sim-preplace-branch-descent-feasible-v1 (coldwin79): also hand the selector a
+                            # descent_predictor so it discards any carry-connected branch whose PLACE DESCENT
+                            # would tilt the carton past the bound -- not just those the leg-2 continuity gate
+                            # rejects -- and chooses deterministically among the descent-feasible ones. Off =>
+                            # None => byte-identical (the greedy first-leg-2-accepted choice).
+                            descent_pred = self._preplace_descent_predictor(robot, measured, tcp_link, limits)
                             sol, self._preplace_branch_report = cl.select_carry_connected_standoff(
                                 robot, standoff, self._carton_up_in_tool_world,
                                 list(self.collect_place_preplace_shape), list(measured), tool_link=tcp_link,
@@ -1867,6 +1915,7 @@ class TransferController:
                                 seeded_interior=getattr(self._carton_level, 'preplace_seeded_interior', False),
                                 level_accept_deg=self._carton_level.preplace_gate_bound_deg,
                                 effort_limit=self._carton_level.preplace_soft_effort_nm,
+                                descent_predictor=descent_pred,
                                 budget_s=self._carton_level.preplace_branch_select_budget_s)
                             sol = {j: float(sol[j]) for j in ARM_JOINTS}
                             self._preplace_branch_cache = (_ck, sol, self._preplace_branch_report)
@@ -1930,6 +1979,31 @@ class TransferController:
                                           'OK' if b['accepted'] else 'rej',
                                           '*' if b['chosen'] else '') for b in rep['branches'])),
                       flush=True)
+                    # sim-preplace-branch-descent-feasible-v1 (coldwin79): when the descent-feasibility filter
+                    # ran, log the ranked candidates with BOTH scores (leg-2 step AND predicted place-descent
+                    # tilt) and the chosen branch, so a console grep proves the selector discarded any
+                    # descent-infeasible branch (e.g. coldwin79's wrist_2=0.052, descent 3.43 deg) and chose
+                    # deterministically among the descent-feasible ones.
+                    if rep.get('descent_feasible_gate'):
+                        def _dts(b):
+                            dt = b.get('descent_tilt_deg')
+                            if not b.get('accepted'):
+                                return 'leg2_rej'
+                            if dt is None:
+                                return 'descent_infeasible'
+                            return ('%.2f' % dt) + ('ok' if b.get('descent_ok') else '>bound')
+                        print('PREPLACE_BRANCH_CANDIDATES n=%d chosen=w2=%.3f descent_tilt=%s leg2_step=%.3f '
+                              '(bound %.2f deg) -- candidates (w2: leg2_step / descent_tilt): %s'
+                              % (len(rep['branches']), rep['chosen_wrist_2'],
+                                 ('%.2f' % rep['chosen_descent_tilt_deg'])
+                                 if rep.get('chosen_descent_tilt_deg') is not None else 'n/a',
+                                 rep['leg2_max_wrist_step'], self._carton_level.bound_deg,
+                                 ', '.join('w2=%.2f(%s/%s)%s'
+                                           % (b['wrist_2'],
+                                              ('%.3f' % b['leg2_max_wrist_step'])
+                                              if b['leg2_max_wrist_step'] is not None else 'unsolved',
+                                              _dts(b), '*' if b['chosen'] else '')
+                                           for b in rep['branches'])), flush=True)
                 elif rep is not None:
                     # sim-preplace-branch-select-bounded-v1: log the chosen branch AND the measured CPU
                     # search time (once per preplace entry) so a console grep proves it stayed off the hot
