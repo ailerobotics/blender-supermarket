@@ -2378,6 +2378,31 @@ class RosMotionPort:
             return self._finish_cancel('succeeded')
         return self._finish_cancel('cancelled')   # CANCELED(5)/ABORTED(6)/other terminal
 
+    def settle_in_place(self):
+        """sim-place-release-cancel-handshake-v1: arm ``cancel_outcome()`` to read the in-flight place
+        execute to a TERMINAL result WITHOUT sending an ExecuteTrajectory action cancel. The contact-
+        triggered weld release stops the DRIVEN place descent on its own channel (the controller emits the
+        contact-hold control so the sim trajectory_host SUCCEEDS holding the current pose -- terminal, no
+        fault, no global ``/manipulation/stop``); this only sets ``_cancel_requested`` so the subsequent
+        ``cancel_outcome()`` polls read the resolved execute future and report its terminal. Unlike
+        ``cancel()`` it NEVER calls ``cancel_goal_async`` -- that is both dropped during the goal-accept
+        race (``self.handle is None`` at the stall) and unsafe here (the sim FollowJointTrajectory executor
+        treats a goal cancel as a FAULT that latches the global stop). Idempotent."""
+        self._cancel_requested = True
+
+    def force_terminal_settled(self):
+        """sim-place-release-cancel-handshake-v1: force the port to a TERMINAL, not-in-flight state for the
+        STOPPED-ARM release fallback -- when the contact-hold terminal never arrives but the controller has
+        PROVED the arm is stopped (measured joint speed below threshold for N ticks) and is about to detach.
+        Mutating the planning scene (the detach) is otherwise rejected by ``update_payload``'s
+        ``_PLAN_IN_FLIGHT_STATES`` guard, so move the state out of flight exactly as ``_finish_cancel`` does
+        (generation bump invalidates any late action callback), never firing the global emergency stop. The
+        controller calls this ONLY after logging ``RELEASE_CANCEL_STOPPED_FALLBACK`` for a provably-stopped
+        arm; it is a no-op when already terminal."""
+        if getattr(self, 'state', 'idle') in ('idle', 'succeeded', 'failed'):
+            return
+        self._finish_cancel('succeeded')
+
     def _finish_cancel(self, outcome):
         """sim-place-release-serialization-v1: drive the port to a TERMINAL, not-in-flight state after a
         cancel, invalidating any late callback (generation bump) -- like ack_failed_result()/_fail_hold()'s
