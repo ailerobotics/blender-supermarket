@@ -579,6 +579,38 @@ release still fails fast by name. Recommended ON values + acceptance:
 `force_terminal_settled` contract, the hold-and-settle, the stopped-arm fallback, a moving arm never
 detaching, and a cw75-trace replay OFF/ON): `scripts/twin/tests/test_place_release_cancel_handshake_v1.py`.
 
+### Re-issuing the gripper-open so the weld release cannot be dropped (sim-release-open-reissue-v1)
+
+The gripper-open that releases the weld at the end of the release phase is a **one-shot** control.
+coldwin84 — a **byte-identical re-run** of the cleanly-released coldwin83 — **hung** at the cart set-down:
+the release fired and the release phase emitted the gripper-open **once**, but the Isaac side ran **zero**
+`cad_tool.command(open)` — `coldwin84.console.log` has **no** `SEAL_DIAG command:open` lines (the last
+`SEAL_DIAG` is still `command:close … enabled=True`) while coldwin83 has exactly **one**. The single
+open-carrying `/manipulation/status` was overwritten on the **last-value** control relay (`control_ipc`
+keeps only the latest status per topic) by the next, no-control release tick's higher `sequence` before
+`IsaacRosGraph.poll` read it — the **same one-shot drop PR 356 fixed for the contact enable**. The
+`SIM_ATTACH_FALLBACK` weld therefore never released and the run e-stopped: `HOST_FAULT_ESTOP phase=release
+'release did not detach the held carton within 8.0s sim of the gripper-open command'`. Five earlier runs on
+the identical config released cleanly, so the release was a **dice roll on relay timing**.
+
+The fix (HOST `carton_level.release_reissue`, opt-in, default off ⇒ the single-shot open + the 8 s
+`release_detach_timeout_s` path, byte-identical) **re-emits the gripper-open control** — which on the Isaac
+side is **both** the open **and** the weld detach (`cad_tool.command(False)` → `open_gripper` +
+`_release_fallback`) — on **every** release tick until the per-tick feedback (`RESTOCK_CONTACT_STATUS_FEEDBACK`
+/ PR 358: `gripper_enabled` + `gripper_status_time`, and the `s.contact` latch) confirms the gripper **open**
+and the carton **not held** (seal released), then proceeds to the cuMotion planning-scene detach
+(`update_payload`, issued **once** from the confirmed-released state). Every release status now carries
+`controls=[open]`, so whichever one the last-value relay hands `IsaacRosGraph.poll` lands the open — the
+relay can no longer drop it. It logs `RELEASE_REISSUE n=..` once per `release_reissue_log_every` ticks and
+`RELEASE_CONFIRMED` with the tick count; if the feedback never confirms within `release_confirm_timeout_s`
+sim it **fails by name** (`RELEASE_NOT_CONFIRMED`, with the `held` / `gripper_open` / `status_fresh` fields)
+rather than the opaque 8 s never-detach e-stop, **never** restarting the stage with the carton welded. The
+confirmation uses `not s.contact` as the authoritative physical seal-released signal, corroborated by the
+gripper-open feedback when a fresh status is present. Recommended ON values + acceptance:
+`docs/examples/release-open-reissue-fragment.json`; CPU proof (the pure `ReleaseReissueGate`, the controller
+re-issue/confirm/timeout branches, OFF byte-identical, and coldwin84 (hang OFF, confirmed ON) / coldwin83
+(single-shot success still confirms) replays): `scripts/twin/tests/test_release_open_reissue_v1.py`.
+
 ## Place-on-cart between-posts target (sim-place-target-between-posts-v1)
 
 The collect place-on-cart load-centre on the rollwagen **upper shelf** is moved from the old
