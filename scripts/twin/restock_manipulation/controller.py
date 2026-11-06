@@ -1798,6 +1798,26 @@ class TransferController:
                             print('PREPLACE_REACTION_BRANCH cached (re-begin): chosen wrist_2=%.4f'
                                   % self._preplace_branch_report.get('chosen_wrist_2', float('nan')),
                                   flush=True)
+                        elif getattr(self._carton_level, 'preplace_branch_prefer_carry_connected', False):
+                            # sim-preplace-pan-first-seeded-leg2-v1: pick the standoff on the branch CONNECTED
+                            # to the carry/tucked shape (wrist_2 ~ the carry wrist_2) so the pan-first leg 2 is
+                            # a monotonic extension the continuity gate accepts -- NOT the min-|wrist_2| 0.668
+                            # branch, which sits on a different level basin the leg-2 wrist_2 cannot reach in
+                            # <= 0.15 rad steps at the standoff pan (coldwin72). The gate stays the authority.
+                            sol, self._preplace_branch_report = cl.select_carry_connected_standoff(
+                                robot, standoff, self._carton_up_in_tool_world,
+                                list(self.collect_place_preplace_shape), list(measured), tool_link=tcp_link,
+                                limits=limits, base_R=self._carton_base_R,
+                                level_joints=self._carton_level.joints,
+                                max_segment_rad=self._carton_level.preplace_max_segment_rad,
+                                bound_deg=self._carton_level.bound_deg,
+                                max_wrist_step_rad=self._carton_level.preplace_max_wrist_step_rad,
+                                seeded_interior=getattr(self._carton_level, 'preplace_seeded_interior', False),
+                                level_accept_deg=self._carton_level.preplace_gate_bound_deg,
+                                effort_limit=self._carton_level.preplace_soft_effort_nm,
+                                budget_s=self._carton_level.preplace_branch_select_budget_s)
+                            sol = {j: float(sol[j]) for j in ARM_JOINTS}
+                            self._preplace_branch_cache = (_ck, sol, self._preplace_branch_report)
                         else:
                             sol, self._preplace_branch_report = cl.select_reaction_natural_standoff(
                                 robot, standoff, self._carton_up_in_tool_world,
@@ -1835,7 +1855,30 @@ class TransferController:
                          self._preplace_standoff_exec_rpy[0], self._preplace_standoff_exec_rpy[1],
                          self._preplace_standoff_exec_rpy[2]), flush=True)
                 rep = self._preplace_branch_report
-                if rep is not None:
+                if rep is not None and rep.get('reason') == 'carry-connected':
+                    # sim-preplace-pan-first-seeded-leg2-v1: the carry-connected branch was chosen (the
+                    # pan-first leg-2 fix). Log the chosen wrist_2, the carry wrist travel, the leg-2 gate
+                    # metrics (step + tilt) that the gate ACCEPTED, and the ranked branches.
+                    print('PREPLACE_REACTION_BRANCH chosen wrist_2=%.3f rad (reason=carry-connected -- '
+                          'pan-first leg 2 is a monotonic extension the continuity gate accepts); '
+                          'select=%.3f s (budget %.1f s, off the host hot path -- coldwin59); carry wrist '
+                          'travel=%.3f rad; leg-2 max wrist step=%.3f rad (<= %.3f) predicted tilt=%.2f deg '
+                          '(<= %.2f); peak soft-wrist holding torque=%.3f N*m on %s -> margin %.1f N*m to '
+                          'the %.0f N*m limit. Branches (w2, carry_travel, leg2_step, accepted): %s'
+                          % (rep['chosen_wrist_2'], rep.get('select_seconds', float('nan')),
+                             self._carton_level.preplace_branch_select_budget_s,
+                             rep['carry_wrist_travel'], rep['leg2_max_wrist_step'],
+                             self._carton_level.preplace_max_wrist_step_rad, rep['leg2_max_tilt_deg'],
+                             self._carton_level.bound_deg, rep['chosen_peak_torque_nm'],
+                             rep['chosen_peak_joint'], rep['chosen_margin_nm'], rep['effort_limit_nm'],
+                             ', '.join('w2=%.2f(trav=%.2f,step=%s,%s)%s'
+                                       % (b['wrist_2'], b['carry_wrist_travel'],
+                                          ('%.3f' % b['leg2_max_wrist_step']) if b['leg2_max_wrist_step']
+                                          is not None else 'unsolved',
+                                          'OK' if b['accepted'] else 'rej',
+                                          '*' if b['chosen'] else '') for b in rep['branches'])),
+                      flush=True)
+                elif rep is not None:
                     # sim-preplace-branch-select-bounded-v1: log the chosen branch AND the measured CPU
                     # search time (once per preplace entry) so a console grep proves it stayed off the hot
                     # path (select_seconds << the host 5 s status watchdog bound).

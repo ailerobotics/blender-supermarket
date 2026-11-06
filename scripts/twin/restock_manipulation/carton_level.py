@@ -90,6 +90,11 @@ DEFAULT_MAX_WRIST_STEP_RAD = 0.15
 # instead of densifying unboundedly. Both are generous safety nets, never reached on a healthy approach.
 _SEEDED_MAX_DEPTH = 6
 _SEEDED_MAX_WAYPOINTS = 600
+# sim-preplace-pan-first-seeded-leg2-v1: the most carry-connected (least carry-travel) standoff branches
+# whose leg-2 continuity gate is validated before giving up. The carry-connected branch ranks near the
+# front, so the healthy path validates ~1; the cap bounds a pathological input from running the expensive
+# seeded leg-2 plan over every far (heavily densified) branch and blowing the CPU search budget.
+_CARRY_CONNECTED_MAX_VALIDATE = 8
 WORLD_UP = np.array([0.0, 0.0, 1.0])
 
 
@@ -607,6 +612,25 @@ class LevelConfig:
     # the soft-wrist effort limit used only to REPORT the margin (never relaxed, never used to stiffen).
     preplace_reaction_branch: bool = False
     preplace_soft_effort_nm: float = 56.0
+    # sim-preplace-pan-first-seeded-leg2-v1: prefer the CARRY-CONNECTED pre-place standoff branch (requires
+    # preplace_reaction_branch). coldwin72 -- the first run with every physical fix stacked -- was stopped
+    # before motion by the continuity gate in the PAN-FIRST leg 2 (PR 366), where the arm extends the
+    # wrists/lift/elbow to the standoff AFTER the pan sweep: with shoulder_pan held at the STANDOFF value and
+    # the wrist_1 self-collision cap (0.65) in force, the reaction-natural standoff (min |wrist_2| = 0.668)
+    # sits on a DIFFERENT carton-level basin than the carry/tucked shape (wrist_2 ~0), so the leg-2 wrist_2
+    # holds ~0 for nine waypoints then JUMPS 0.300 rad in one step (> the 0.15 rad continuity limit) --
+    # CARTON_LEVEL_PLAN_REJECTED. No continuous monotonic <=0.15 level path connects the two basins at the
+    # standoff pan (CPU-proven: the crossing tilt ridge minimum is ~2.44 deg > the 2.0 bound, for EVERY
+    # wrist_1 cap). The fix is to choose the standoff on the branch CONNECTED to the carry shape (wrist_2 ~
+    # the carry wrist_2), where leg 2 is a monotonic extension with no cross-branch sweep. The soft-wrist
+    # drift that originally pushed PR 345 to the 0.668 settling branch is now held by the PR 359 firm wrist
+    # hold, so the ~0 branch is admissible again. When ON, ``select_reaction_natural_standoff`` enumerates
+    # reach+level+self-clear branches seeded from the carry shape + a wrist grid (the low-wrist_2 family the
+    # 7-seed sweep misses), ranks by total wrist travel from the carry shape, and returns the FIRST branch
+    # whose leg-2 world-level plan the continuity gate ACCEPTS (step <= preplace_max_wrist_step_rad AND tilt
+    # <= bound_deg) -- the gate stays the authority. Default OFF => the min-|wrist_2| settling branch is used
+    # (byte-identical). Requires preplace_reaction_branch (it is that selector's branch rule).
+    preplace_branch_prefer_carry_connected: bool = False
     # sim-preplace-branch-select-bounded-v1: CPU time-box (seconds) for the reaction-branch standoff
     # search (``select_reaction_natural_standoff``). The search is pure CPU and now cheap (~0.08 s on the
     # coldwin57 fixture), so this is a safety net: a search still running after the budget REFUSES the
@@ -810,7 +834,8 @@ def resolve_level_config(spec):
                  'preplace_above_place', 'place_clearance_check', 'place_clearance_drooped',
                  'closed_loop_level', 'place_contact_release', 'closed_loop_sensor',
                  'preplace_above_support', 'preplace_level_gate', 'preplace_reaction_branch',
-                 'preplace_seeded_interior', 'place_release_on_contact'):
+                 'preplace_seeded_interior', 'preplace_branch_prefer_carry_connected',
+                 'place_release_on_contact'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     # sim-place-release-on-contact-v1
@@ -2680,6 +2705,182 @@ def enumerate_level_place_branches(robot, target_pos, up_in_tool, seed_config, *
         seen.add(key)
         out.append(sol)
     return out
+
+
+# sim-preplace-pan-first-seeded-leg2-v1: the wrist_2 seed values (ABSOLUTE targets, rad) the carry-connected
+# enumeration sweeps. ``level_place_ik`` already multi-starts internally over wrist_3 (flange roll) x wrist_1,
+# returning the branch NEAREST the seed, so sweeping only the seed wrist_2 (the branch discriminant for a
+# top-grasped level carton) spans the equivalent-orientation family cheaply. 5 values x 2 seed bases
+# (carry + the reach shape) = 10 level_place_ik calls (~3 s on the real cw72 inputs, comparable to the
+# min-|wrist_2| selector's 7-call enumerate), far fewer than a (wrist_2, wrist_3) grid.
+_CARRY_CONNECTED_W2_SEEDS = (0.0, 0.2, 0.4, 0.6, 0.8)
+
+
+def enumerate_carry_connected_branches(robot, target_pos, up_in_tool, seed_config, carry_config, *,
+                                       joints=None, tool_link='ur_tool0', root='ur_base_link',
+                                       limits=None, base_R=None, fast=True):
+    """Enumerate reach+level standoff branches spanning the LOW-wrist_2 family connected to the carry shape
+    (sim-preplace-pan-first-seeded-leg2-v1).
+
+    The 7-seed wrist_2 sweep in :func:`enumerate_level_place_branches` (seeded only from the reach shape,
+    deduped by wrist_2 alone) misses the carry-connected low-wrist_2 branches at the pan-first standoff
+    (coldwin72: it reported min wrist_2 0.668, while reach+level+self-clear branches at wrist_2 ~0.09 /
+    wrist_3 ~-0.12 exist -- the ones whose leg-2 the continuity gate accepts). Here :func:`level_place_ik`
+    (which already multi-starts over wrist_3 x wrist_1 internally, returning the branch nearest the seed) is
+    seeded from BOTH the carry shape and the reach shape, each with wrist_2 swept over
+    ``_CARRY_CONNECTED_W2_SEEDS``, so both low- and mid-wrist_2 families are found. Returns a list of
+    ARM-order joint maps (reach+level, in ``limits``), deduped by the rounded (wrist_2, wrist_3). Pure/CPU."""
+    cfg = _as_joint_map(seed_config)
+    carry = _as_joint_map(carry_config)
+    w2, w3 = 'ur_wrist_2_joint', 'ur_wrist_3_joint'
+    lo2, hi2 = 0.0, math.pi
+    if limits and w2 in limits:
+        lo2 = max(lo2, float(limits[w2][0]))
+        hi2 = min(hi2, float(limits[w2][1]))
+    seeds = [dict(carry), dict(cfg)]
+    for base in (carry, cfg):
+        if w2 in base:
+            for a in _CARRY_CONNECTED_W2_SEEDS:
+                if lo2 - 1e-9 <= a <= hi2 + 1e-9:
+                    s = dict(base)
+                    s[w2] = float(a)
+                    seeds.append(s)
+    out = []
+    seen = set()
+    for s in seeds:
+        try:
+            sol = level_place_ik(robot, target_pos, up_in_tool, s, joints=joints, tool_link=tool_link,
+                                 root=root, limits=limits, gravity_comp=None, base_R=base_R, fast=fast)
+        except ValueError:
+            continue
+        key = (round(_wrap(float(sol.get(w2, 0.0))), 2), round(_wrap(float(sol.get(w3, 0.0))), 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(sol)
+    return out
+
+
+def select_carry_connected_standoff(robot, target_pos, up_in_tool, seed_config, carry_config, *,
+                                    joints=None, level_joints=DEFAULT_LEVEL_JOINTS, soft_joints=None,
+                                    tool_link='ur_tool0', root='ur_base_link', limits=None, base_R=None,
+                                    carton_mass=0.45, max_segment_rad=0.25,
+                                    bound_deg=DEFAULT_TILT_BOUND_DEG,
+                                    max_wrist_step_rad=DEFAULT_MAX_WRIST_STEP_RAD,
+                                    seeded_interior=False, level_accept_deg=None, effort_limit=56.0,
+                                    budget_s=None, clock=None, fast=True):
+    """Choose the pre-place standoff on the branch CONNECTED to the carry/tucked shape, so the PAN-FIRST
+    leg 2 (carry -> standoff) is a monotonic extension the continuity gate accepts
+    (sim-preplace-pan-first-seeded-leg2-v1, the coldwin72 fix).
+
+    coldwin72 -- the first run with every physical fix stacked (pick sealed, pan swept the cage clear with
+    the base locked, wrist held) -- was stopped before motion by the continuity gate in the re-ordered
+    PAN-FIRST leg 2 (PR 366): the reaction-natural standoff (min |wrist_2| = 0.668) sits on a DIFFERENT
+    carton-level basin than the carry/tucked shape (wrist_2 ~0), separated at the standoff pan by the
+    wrist_1 self-collision cap. The leg-2 wrist_2 therefore holds ~0 for nine waypoints then JUMPS 0.300 rad
+    (> the 0.15 rad continuity limit the soft wrist can track) -> CARTON_LEVEL_PLAN_REJECTED. CPU-proven: no
+    continuous monotonic <=0.15 level path connects the two basins at the standoff pan (the crossing tilt
+    ridge minimum is ~2.44 deg > the 2.0 bound, for every wrist_1 cap), so the PR 349 seeding cannot help.
+    The PR 359 firm wrist hold now covers the soft-wrist drift that originally pushed PR 345 to the 0.668
+    settling branch, so the carry-connected (wrist_2 ~0) branch is admissible again.
+
+    Among the reach+level+self-clear branches (:func:`enumerate_carry_connected_branches`, seeded from the
+    carry shape so the low-wrist_2 family is found), rank by total wrist travel from the carry shape and
+    return the FIRST branch whose leg-2 world-level plan (:func:`plan_level_world_approach`, the SAME anchor
+    the controller drives -- ``'seeded'`` when ``seeded_interior`` else ``'auto'``) the continuity gate
+    ACCEPTS: every per-waypoint wrist step <= ``max_wrist_step_rad`` AND predicted tilt <= ``bound_deg``. The
+    leg-2 start is the carry tucked wrists at the branch's (standoff) shoulder_pan -- the pan-first leg-1
+    end. The gate stays the authority; a branch whose leg-2 gate rejects is skipped. ``budget_s`` time-boxes
+    the search on ``clock`` (default ``time.perf_counter``) as in :func:`select_reaction_natural_standoff`.
+
+    Returns ``(standoff_map, report)`` with ``report['reason'] = 'carry-connected'`` plus
+    ``chosen_wrist_2``, ``carry_wrist_travel``, ``leg2_max_wrist_step``, ``leg2_max_tilt_deg``,
+    ``chosen_peak_torque_nm`` / ``chosen_peak_joint`` / ``chosen_margin_nm`` (for the log), ``branches``
+    (ranked), ``effort_limit_nm``, ``select_seconds``. Raises ValueError when no carry-connected branch
+    yields a gate-accepted leg-2 (the caller falls back to the single ``level_place_ik`` standoff / fails
+    honestly). Pure/CPU."""
+    if clock is None:
+        clock = time.perf_counter
+    t0 = clock()
+
+    def _tick():
+        if budget_s is not None and (clock() - t0) > budget_s:
+            raise BranchSelectBudgetExceeded(
+                'carry-connected standoff search exceeded the %.3f s budget (%.3f s elapsed)'
+                % (float(budget_s), clock() - t0))
+
+    soft = tuple(soft_joints) if soft_joints is not None else tuple(level_joints)
+    carry = _as_joint_map(carry_config)
+    lj = [j for j in level_joints if j in carry]
+    branches = enumerate_carry_connected_branches(
+        robot, target_pos, up_in_tool, seed_config, carry_config, joints=joints, tool_link=tool_link,
+        root=root, limits=limits, base_R=base_R, fast=fast)
+    if not branches:
+        raise ValueError('no reach+level standoff branch at target %s (carry-connected enumeration)'
+                         % list(np.round(np.asarray(target_pos, float)[:3], 4)))
+
+    def _travel(std):
+        return sum(abs(_wrap(float(std[j]) - float(carry[j]))) for j in lj if j in std)
+
+    ranked = sorted(branches, key=_travel)
+    anchor = 'seeded' if seeded_interior else 'auto'
+    lacc = level_accept_deg if seeded_interior else None
+    report_branches = []
+    chosen = chosen_plan = None
+    # Validate the leg-2 gate of the CLOSEST (least carry travel) branches first and STOP at the first the
+    # gate accepts -- the carry-connected branch is by construction a near branch, so this is ~one leg-2
+    # plan on the healthy path. Bound the validations (``_CARRY_CONNECTED_MAX_VALIDATE``) so a pathological
+    # input cannot run the expensive seeded plan over every far (high-travel, heavily densified) branch and
+    # blow the heartbeat budget; the far 0.668-family branches rank last and are never reached on the
+    # healthy path.
+    for std in ranked[:_CARRY_CONNECTED_MAX_VALIDATE]:
+        _tick()
+        # leg-2 start: the carry tucked wrists/lift/elbow at THIS branch's shoulder_pan (the leg-1 end --
+        # pan-first leg 1 holds the carry shape and sweeps shoulder_pan to the standoff pan).
+        start = dict(carry)
+        start['ur_shoulder_pan_joint'] = float(std['ur_shoulder_pan_joint'])
+        travel = _travel(std)
+        try:
+            plan = plan_level_world_approach(
+                robot, start, std, up_in_tool, level_joints=level_joints, tool_link=tool_link, root=root,
+                limits=limits, bound_deg=bound_deg, max_segment_rad=max_segment_rad, base_R=base_R,
+                max_wrist_step_rad=max_wrist_step_rad, anchor=anchor, fast=fast, level_accept_deg=lacc)
+        except ValueError:
+            report_branches.append({'wrist_2': float(std.get('ur_wrist_2_joint', 0.0)),
+                                    'carry_wrist_travel': travel, 'leg2_max_wrist_step': None,
+                                    'leg2_max_tilt_deg': None, 'accepted': False, 'chosen': False})
+            continue
+        step_ok = plan.reject_wrist_step(max_wrist_step_rad, level_joints=level_joints) is None
+        tilt_ok = plan.reject(bound_deg) is None
+        accepted = step_ok and tilt_ok
+        report_branches.append({'wrist_2': float(std.get('ur_wrist_2_joint', 0.0)),
+                                'carry_wrist_travel': travel,
+                                'leg2_max_wrist_step': float(plan.max_wrist_step),
+                                'leg2_max_tilt_deg': float(max(plan.max_roll, plan.max_pitch)),
+                                'accepted': accepted, 'chosen': accepted})
+        if accepted:
+            chosen = std
+            chosen_plan = plan
+            break
+    if chosen is None:
+        raise ValueError('no carry-connected standoff branch whose pan-first leg-2 approach the continuity '
+                         'gate accepts (step <= %.3f rad AND tilt <= %.2f deg); ranked %d reach+level '
+                         'branches, validated %d' % (float(max_wrist_step_rad), float(bound_deg),
+                                                     len(ranked), len(report_branches)))
+    # torque for the chosen (reported only, like the min-|wrist_2| selector)
+    chosen_start = dict(carry)
+    chosen_start['ur_shoulder_pan_joint'] = float(chosen['ur_shoulder_pan_joint'])
+    peak, pj, per = wrist_hold_torque_peak(robot, [_as_vec(chosen_start), _as_vec(chosen)], soft,
+                                           carton_mass=carton_mass, tool_link=tool_link, root=root)
+    report = {'reason': 'carry-connected', 'branches': report_branches,
+              'chosen_wrist_2': float(chosen.get('ur_wrist_2_joint', 0.0)),
+              'carry_wrist_travel': _travel(chosen),
+              'leg2_max_wrist_step': float(chosen_plan.max_wrist_step),
+              'leg2_max_tilt_deg': float(max(chosen_plan.max_roll, chosen_plan.max_pitch)),
+              'chosen_peak_torque_nm': peak, 'chosen_peak_joint': pj,
+              'chosen_margin_nm': float(effort_limit) - peak, 'effort_limit_nm': float(effort_limit),
+              'select_seconds': clock() - t0, 'full_plan': False}
+    return dict(chosen), report
 
 
 def select_reaction_natural_standoff(robot, target_pos, up_in_tool, seed_config, carry_config, *,
