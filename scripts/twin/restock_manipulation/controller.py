@@ -826,6 +826,22 @@ class TransferController:
                 confirm_timeout_s=min(float(self._carton_level.release_confirm_timeout_s),
                                       float(phase_timeout)),
                 log_every=int(self._carton_level.release_reissue_log_every))
+        # sim-release-threshold-carton-frame-v1: the opt-in post-detach FREE-AND-RESTING + clearance-lift gate
+        # (coldwin85/86 fell to the floor when the retreat swept the barely-rested carton off the shelf).
+        # Built only when carton_level.release_free_check is on => off => None => the detach transitions
+        # straight to retreat => byte-identical. These flags drive the post-detach sub-state in the release
+        # phase; inert (never set) when the gate is off.
+        self._release_free = None
+        if self._carton_level is not None and getattr(self._carton_level, 'release_free_check', False):
+            from . import release_free as _release_free_mod
+            cl = self._carton_level
+            self._release_free = _release_free_mod.ReleaseFreeGate(
+                settle_ticks=cl.release_free_settle_ticks, stable_eps_m=cl.release_free_stable_eps_m,
+                rest_gap_m=cl.release_free_rest_gap_m,
+                settle_window_ticks=cl.release_free_settle_window_ticks,
+                lift_dz_m=cl.release_free_lift_dz_m, follow_frac=cl.release_free_follow_frac)
+        self._released_detached = False   # a weld detach is confirmed; the free-check sub-state owns retreat
+        self._rf_stage = 'settle'         # release_free sub-stage: 'settle' (hold) -> 'lift' -> (proceed/fail)
         # sim-robust-phase-timeout-during-recovery-v1: credit the per-phase timeout clock for the sim time
         # spent while the motion adapter is inside a NAMED move_group crash recovery (respawn hold /
         # post-respawn re-attach / an observed move_group death still being recovered -- motion.
@@ -1088,6 +1104,11 @@ class TransferController:
         if self._reactive_arm is not None:   # re-arm the human-aware reactive authority per op
             self._reactive_arm.reset(0.0)
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
+        # sim-release-threshold-carton-frame-v1: fresh post-detach free-check sub-state per op.
+        self._released_detached = False
+        self._rf_stage = 'settle'
+        if self._release_free is not None:
+            self._release_free.reset()
         self.verify_ids = set()
         self.release_time = None
         # sim-place-release-serialization-v1: fresh contact-release cancel sub-state per op (see __init__).
@@ -2194,6 +2215,87 @@ class TransferController:
             return None
         return tuple(float(sol[j]) for j in ARM_JOINTS)
 
+    def _begin_retreat_after_detach(self, now):
+        """sim-release-threshold-carton-frame-v1: entry point after the weld detach is confirmed. When the
+        opt-in free-and-resting gate is on, HOLD in the release phase and let the free-check sub-state own the
+        transition to retreat (prove the carton is free+resting, clearance-lift, then retreat / RELEASE_NOT_FREE).
+        Off => transition straight to retreat, byte-identical with the prior ``self._transition('retreat')``."""
+        if self._release_free is not None:
+            self._release_free.reset()
+            self._rf_stage = 'settle'
+            self._released_detached = True
+            print('RELEASE_FREE_BEGIN phase=release now=%.3f: weld detached -- holding to prove the carton is '
+                  'free of the gripper and resting before the retreat' % now, flush=True)
+            return
+        self._transition('retreat')
+
+    def _release_free_step(self, now, s):
+        """sim-release-threshold-carton-frame-v1: the post-detach free-and-resting + clearance-lift sub-state
+        (only reached when ``release_free_check`` is on and the detach has been confirmed). Stages:
+          * 'settle': HOLD (no retreat motion) until the measured carton CENTRE z is stable AND the carton
+            BOTTOM is resting on the support for ``settle_ticks`` ticks, then command a pure vertical
+            clearance lift; refuse ``RELEASE_NOT_FREE`` if the carton never comes to rest.
+          * 'lift': poll the clearance lift; on completion verify the carton did NOT follow the gripper up,
+            then transition to retreat (the lateral fold) or refuse ``RELEASE_NOT_FREE``.
+        A missing measured ``placed_pose`` (real rig / verify_place off) skips the check -> straight retreat."""
+        gate = self._release_free
+        if s.placed_pose is None or len(s.placed_pose) < 3 or not math.isfinite(float(s.placed_pose[2])):
+            print('RELEASE_FREE_SKIP phase=release now=%.3f: no measured carton pose -- retreating without '
+                  'the free-and-resting check' % now, flush=True)
+            self._released_detached = False
+            self._transition('retreat')
+            return self._result()
+        carton_z = float(s.placed_pose[2])
+        half_h = self.profile.dimensions[2] / 2.0
+        bottom_gap = (carton_z - half_h) - float(self.target_surface[2])
+        if self._rf_stage == 'settle':
+            dec = gate.settle(carton_z=carton_z, bottom_gap=bottom_gap)
+            if dec.action == 'refuse':
+                return self._fail('RELEASE_NOT_FREE: ' + dec.reason)
+            if dec.action == 'lift':
+                liftoff = self._collect_retreat_liftoff_goal(s.joint_positions)
+                if liftoff is None:
+                    # No straight-up IK solution from here: skip the clearance lift (no regression vs the
+                    # prior straight-to-retreat behaviour) and retreat. The settle check still ran.
+                    print('RELEASE_FREE_LIFT_UNSOLVED phase=release now=%.3f: %s -- retreating without the '
+                          'clearance lift' % (now, dec.reason), flush=True)
+                    self.evidence.append({'release_free_lift_unsolved': {'sim_time': float(now)}})
+                    self._released_detached = False
+                    self._transition('retreat')
+                    return self._result()
+                print('RELEASE_FREE_LIFT phase=release now=%.3f carton_z=%.4f bottom_gap=%.4f: %s'
+                      % (now, carton_z, bottom_gap, dec.reason), flush=True)
+                self.evidence.append({'release_free_lift': {
+                    'sim_time': float(now), 'carton_z': carton_z, 'bottom_gap': float(bottom_gap)}})
+                self.motion.begin_joint_goal(liftoff, s.joint_positions, straight_line=True)
+                self._rf_stage = 'lift'
+                self._retreat_lifted = True   # the retreat skips its own lift-off (the clearance lift did it)
+                return self._result(({'kind': 'move', 'pose': None, 'phase': 'release'},))
+            # 'settle': keep holding (no motion issued; the arm keeps its detached pose)
+            return self._result()
+        # self._rf_stage == 'lift'
+        try:
+            outcome = self.motion.poll()
+        except Exception as exc:  # noqa: BLE001 -- route a raise through the staged retry like other moves
+            return self._raised_move_exc(exc, staged=True)
+        if outcome == 'failed':
+            return self._fail('RELEASE_NOT_FREE: the post-detach vertical clearance lift failed to plan/execute')
+        if outcome == 'succeeded':
+            dec = gate.follow(carton_z=carton_z)
+            if dec.action == 'refuse':
+                return self._fail('RELEASE_NOT_FREE: ' + dec.reason)
+            print('RELEASE_FREE_CLEAR phase=release now=%.3f carton_z=%.4f: %s -> retreat'
+                  % (now, carton_z, dec.reason), flush=True)
+            self.evidence.append({'release_free_clear': {
+                'sim_time': float(now), 'carton_z': carton_z,
+                'rise': (None if dec.rise is None else float(dec.rise))}})
+            self._released_detached = False
+            self._transition('retreat')
+            return self._result()
+        if outcome != 'running':
+            return self._fail('invalid release clearance-lift motion outcome')
+        return self._result()
+
     def _carton_level_frame(self, phase):
         """sim-preplace-leg2-level-v1: the ``(up_in_tool, base_R)`` the carton-level measurement uses for
         ``phase``. The collect PREPLACE under the held chassis attitude is levelled IN WORLD, so its trip /
@@ -3292,14 +3394,23 @@ class TransferController:
                                 try:
                                     from twin.restock_manipulation import carton_level as _cl3
                                     drop = _cl3.place_descent_drop_m(robot, waypoints, tool_link=tcp_link)
-                                    self._place_contact_release_z = _cl3.place_contact_release_z(
-                                        float(s.placed_pose[2]), drop, self._carton_level.place_contact_gap_m)
+                                    # sim-release-threshold-carton-frame-v1: placed_pose[2] is the carton
+                                    # CENTRE (types.py), so the geometric release threshold is expressed in
+                                    # the carton-centre frame -- add the carton half-height so the trigger
+                                    # fires when the carton BOTTOM reaches support_top + gap, not half-height
+                                    # below (coldwin87: the legacy bottom-frame 0.5635 sat 0.078 m below the
+                                    # measured rest 0.6422, so with the startup-stall suppressed the arm
+                                    # pressed the welded carton into the shelf to HOST_FAULT_ESTOP).
+                                    carton_height = float(self.profile.dimensions[2])
+                                    self._place_contact_release_z = _cl3.place_contact_release_z_centre(
+                                        float(s.placed_pose[2]), drop, self._carton_level.place_contact_gap_m,
+                                        carton_height)
                                     print('PLACE_CONTACT_RELEASE_ARM phase=place start_carton_z=%.4f '
-                                          'descent_drop=%.4f gap=%.4f -> release at carton_z<=%.4f '
-                                          '(release the weld at deck contact instead of pressing the welded '
-                                          'carton into the deck)'
+                                          'descent_drop=%.4f gap=%.4f carton_h=%.4f -> release at '
+                                          'carton_z(centre)<=%.4f (fire at true contact: carton BOTTOM at '
+                                          'support_top + gap, carton CENTRE + half-height)'
                                           % (float(s.placed_pose[2]), drop,
-                                             self._carton_level.place_contact_gap_m,
+                                             self._carton_level.place_contact_gap_m, carton_height,
                                              self._place_contact_release_z), flush=True)
                                 except (ValueError, KeyError) as exc:
                                     print('PLACE_CONTACT_RELEASE_ARM disabled: %s (legacy level-gate release '
@@ -3771,6 +3882,12 @@ class TransferController:
                     return self._fail('grasp did not confirm a held carton within the retry budget')
             return self._result()
         if self.phase == 'release':
+            # sim-release-threshold-carton-frame-v1: once the weld detach is confirmed, the opt-in
+            # free-and-resting + clearance-lift sub-state owns the transition to retreat (hold -> prove the
+            # carton is free+resting -> clear the gripper straight up -> retreat, or RELEASE_NOT_FREE). Off =>
+            # _released_detached is never set => this is never reached => byte-identical.
+            if self._release_free is not None and self._released_detached:
+                return self._release_free_step(now, s)
             # sim-place-release-serialization-v1: a CONTACT-TRIGGERED release arrived MID place-execute (the
             # place ExecuteTrajectory is still in flight). Serialize the release as a proper phase transition:
             # (1) cancel the in-flight place move -- the cancel is the stop, so the arm never keeps pressing;
@@ -3913,7 +4030,7 @@ class TransferController:
                              dec.gripper_status_fresh), flush=True)
                     self.evidence.append({'release_confirmed': {
                         'sim_time': float(now), 'ticks': int(dec.ticks), 'elapsed_s': float(dec.elapsed_s)}})
-                    self._transition('retreat')
+                    self._begin_retreat_after_detach(now)
                     return self._result()
                 if dec.action == 'timeout':
                     return self._fail('RELEASE_NOT_CONFIRMED: gripper-open + weld-detach re-issued every '
@@ -3930,7 +4047,7 @@ class TransferController:
                 self.held = False
                 if not self.motion.update_payload(False, self.profile):
                     return self._fail('payload collision detachment not acknowledged')
-                self._transition('retreat')
+                self._begin_retreat_after_detach(now)
                 return self._result()
             # sim-robust-cart-place-descent-v1: the gripper-open was emitted but the measured contact has
             # not cleared -- the SIM_ATTACH weld / suction is still holding the carton. self.elapsed counts

@@ -643,6 +643,45 @@ the honest `carton not resting on deck` gate, never loosened). Recommended ON va
 true set-down, a real near-set-down stall still firing, OFF byte-identical, and the coldwin85/coldwin83
 replays): `scripts/twin/tests/test_place_verify_rest_tolerance_v1.py`.
 
+### Releasing at the carton-CENTRE frame + a free-and-resting retreat (sim-release-threshold-carton-frame-v1)
+
+coldwin87 showed the previous fix was aimed at the wrong frame. `carton_z` / `sensors.placed_pose[2]` is the
+carton **CENTRE** (`types.py`), but the geometric contact-release threshold `place_contact_release_z`
+(`start_carton_z − drop + gap`) expressed the carton **BOTTOM** frame (support_top + gap), so it sat one
+carton **half-height** too low: cw87 `PLACE_CONTACT_RELEASE_ARM start_carton_z=0.6422 descent_drop=0.0907
+gap=0.0120 → release at carton_z<=0.5635`, while the welded carton rested on the shelf at carton_z **0.6422**
+(the `PLACE_RELEASE_TICK` plateau — `half − gap = 0.09 − 0.012 = 0.078` m **above** 0.5635). With the
+startup-stall suppression (`place_release_stall_height_margin_m=0.02`) on, the stall trigger could not fire
+either, so the stiff place drive pressed the welded carton into the shelf → `STATION_FULL_BRAKE_EFFORT` →
+`PATH_TOLERANCE_VIOLATED` → `HOST_FAULT_ESTOP`. The stall **was the real contact** all along.
+
+**Fix 1 — threshold frame (automatic, no new key).** `carton_level.place_contact_release_z_centre` adds the
+carton half-height (`profile.dimensions[2]/2 = 0.18/2 = 0.09`) so the threshold is in the same **carton-centre**
+frame as the measured pose: cw87 `0.6422 − 0.0907 + 0.09 + 0.012 = 0.6535`, i.e. the geometric z trigger fires
+at the measured rest (carton **bottom** at `support_top + gap`), **consistent with the stall trigger**, not
+0.078 m below it. The `PLACE_CONTACT_RELEASE_ARM` log now prints `release at carton_z(centre)<=…`. This is
+automatic inside the already-opt-in `place_contact_release` / `place_release_on_contact` mechanism (no config
+key; byte-identical when that mechanism is off). **Keep PR 373's `place_release_stall_height_margin_m` OFF** —
+with the frame corrected the stall trigger fires at the true contact the same place the z trigger does, and
+leaving the margin on is what suppressed cw87's stall into the press.
+
+**Fix 2 — free-and-resting retreat (`carton_level.release_free_check`, opt-in, default off ⇒ byte-identical).**
+coldwin85/coldwin86 released at the set-down and the retreat's first motion swept the barely-rested carton off
+the shelf (verify `carton not resting on deck`, cw85 `bottom_gap=-0.954`, cw86 `-0.815`); coldwin83 on the same
+config happened to rest. The fall was a **retreat** problem — the open gripper still cradled the carton. With
+`release_free_check` on, `release_free.ReleaseFreeGate` **holds** after the detach until the carton CENTRE z is
+stable **and** the carton bottom is resting (`|bottom_gap| ≤ release_free_rest_gap_m`) for
+`release_free_settle_ticks` ticks, **then** raises the gripper straight up by `release_free_lift_dz_m` (a pure
+vertical clearance lift, reusing the collect retreat lift-off IK) **before any lateral/pan retreat**, and
+verifies the carton did **not** follow the gripper up (rose `< release_free_follow_frac` of the lift). It
+**fails by name `RELEASE_NOT_FREE`** when the carton never rests (`release_free_settle_window_ticks`) or follows
+the gripper. Needs a measured `placed_pose` (`RESTOCK_VERIFY_PLACE`); absent ⇒ the check is skipped (real rig).
+Logs `RELEASE_FREE_BEGIN` / `RELEASE_FREE_LIFT` / `RELEASE_FREE_CLEAR`. Neither fix touches the 2.0° carton tilt
+bound. Recommended ON values + acceptance: `docs/examples/release-threshold-carton-frame-fragment.json`; CPU
+proof (the centre-frame threshold at the cw87/83/85/86 numbers, the free-and-resting settle/lift, the
+following-refusal, OFF byte-identical, controller wiring):
+`scripts/twin/tests/test_release_threshold_carton_frame_v1.py`.
+
 ## Place-on-cart between-posts target (sim-place-target-between-posts-v1)
 
 The collect place-on-cart load-centre on the rollwagen **upper shelf** is moved from the old
