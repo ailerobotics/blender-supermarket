@@ -90,7 +90,8 @@ class PlaceReleaseGate:
                  effort_consecutive: int = 3, stall_eps_m: float = 0.001, stall_ticks: int = 5,
                  contact_gap_mm: Optional[float] = None,
                  support_tokens: Sequence[str] = DEFAULT_SUPPORT_TOKENS,
-                 obstruction_gap_mm: float = 2.0, effort_warmup_ticks: int = 3):
+                 obstruction_gap_mm: float = 2.0, effort_warmup_ticks: int = 3,
+                 stall_height_margin_m: Optional[float] = None):
         self.release_z = None if release_z is None else float(release_z)
         self.effort_margin_nm = float(effort_margin_nm)
         self.effort_consecutive = max(1, int(effort_consecutive))
@@ -100,6 +101,20 @@ class PlaceReleaseGate:
         self.support_tokens = tuple(support_tokens)
         self.obstruction_gap_mm = float(obstruction_gap_mm)
         self.effort_warmup_ticks = max(0, int(effort_warmup_ticks))
+        # sim-place-verify-rest-tolerance-v1: a descent STALL only means 'support met' when the carton is
+        # at/near the planned set-down height ``release_z``. None (default) => the stall trigger is
+        # unchanged (byte-identical). A finite margin gates it: a stall whose carton centre z is still
+        # above ``release_z + stall_height_margin_m`` is a render-paced STARTUP stall (the descent
+        # trajectory has not produced motion yet -- carton_z frozen at the standoff), NOT a set-down, so
+        # it is suppressed and the descent keeps pressing until the carton actually reaches the support
+        # (the z / effort / support-contact triggers then fire at the true set-down). Inert when
+        # ``release_z`` is None (no reference height). See coldwin83/coldwin85: both released on this
+        # startup stall ~0.06 m HIGH, leaving the carton cradled above the shelf -- cw83's slipped free
+        # and rested, cw85's was carried off by the retreat and fell to the floor (verify xy=1.219
+        # bottom_gap=-0.954). Making the release fire at the true set-down height makes the rest
+        # deterministic in both.
+        self.stall_height_margin_m = (None if stall_height_margin_m is None
+                                       else float(stall_height_margin_m))
         self.reset()
 
     def reset(self, release_z: Optional[float] = ...) -> None:  # type: ignore[assignment]
@@ -121,6 +136,16 @@ class PlaceReleaseGate:
         except (TypeError, ValueError):
             return None
         return f if math.isfinite(f) else None
+
+    def _stall_is_setdown(self, z: float) -> bool:
+        """sim-place-verify-rest-tolerance-v1: whether a no-downward-progress STALL at carton centre ``z``
+        is close enough to the planned set-down height ``release_z`` to count as 'support met'. True (no
+        gating) when the margin or ``release_z`` is unset; otherwise the stall only counts once the carton
+        has descended to within ``stall_height_margin_m`` of ``release_z`` -- a stall still well above it is
+        the render-paced startup stall (trajectory not yet moving), not a set-down. Pure."""
+        if self.stall_height_margin_m is None or self.release_z is None:
+            return True
+        return z <= self.release_z + self.stall_height_margin_m
 
     def _classify_obstruction(self, seal_gap_mm: Optional[float],
                               seal_hit_prims: Optional[Sequence[str]]) -> Optional[str]:
@@ -168,7 +193,8 @@ class PlaceReleaseGate:
                 self._stall = 0
             else:
                 self._stall += 1
-        stall_trigger = z is not None and self._stall >= self.stall_ticks
+        stall_trigger = (z is not None and self._stall >= self.stall_ticks
+                         and self._stall_is_setdown(z))
         # --- obstruction: a NON-support body flush under the descending carton (gate on the touched body) ---
         obstruction_prim = self._classify_obstruction(seal_gap_mm, seal_hit_prims)
         # --- contact: a SUPPORT body at/below the configured seal gap ---
