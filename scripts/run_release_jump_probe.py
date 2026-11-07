@@ -125,6 +125,46 @@ def _read_bind(stage, tick, phase, t0):
             'joint_refs': joint_refs, 'contacts': contacts}
 
 
+def _gripper_collider_audit(stage):
+    """Report EVERY tool-side gripper collider's live state -- INCLUDING instance proxies, which the
+    mission's _set_carton_collision (stage.Traverse) SKIPS, so a proxy collider stays enabled through the
+    carry+release. Returns [{name, path, collision_enabled, instance_proxy}]. The hypothesis: surface_plate
+    / cube colliders are instance proxies => never disabled => live + coincident with the carton face."""
+    from pxr import Usd, UsdPhysics
+    from twin.restock_manipulation.cad_tool import TOOL_SIDE_COLLIDERS
+    out = []
+    root = stage.GetPrimAtPath('/')
+    for p in Usd.PrimRange(root, Usd.TraverseInstanceProxies()):
+        if not p.HasAPI(UsdPhysics.CollisionAPI):
+            continue
+        ps = str(p.GetPath())
+        name = next((t for t in TOOL_SIDE_COLLIDERS if ('/' + t) in ps), None)
+        if name is None:
+            continue
+        v = UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr().Get()
+        out.append({'name': name, 'path': ps,
+                    'collision_enabled': (True if v is None else bool(v)),
+                    'instance_proxy': bool(p.IsInstanceProxy())})
+    return out
+
+
+def _author_support_box(stage, carton, half_h, *, drop=0.0005):
+    """Author a static box collider flush under the carton bottom so the released carton RESTS (does not
+    free-fall) with the gripper pad still coincident -- reproduces the mission set-down geometry so a
+    live gripper panel coincident with the carton face can show its penetration-contact lift."""
+    from pxr import UsdGeom, UsdPhysics, Gf
+    pos, _ = carton.get_world_pose()
+    top = float(pos[2]) - float(half_h) - float(drop)         # support top just below the carton bottom
+    path = '/ResidualBindSupport'
+    cube = UsdGeom.Cube.Define(stage, path)
+    cube.CreateSizeAttr(1.0)
+    xf = UsdGeom.Xformable(cube.GetPrim())
+    xf.AddTranslateOp().Set(Gf.Vec3d(float(pos[0]), float(pos[1]), top - 0.5))  # size-1 cube, top at `top`
+    UsdPhysics.CollisionAPI.Apply(cube.GetPrim())             # static collider (no RigidBodyAPI)
+    print('RESIDUAL_BIND support box authored top_z=%.4f under carton bottom' % top, flush=True)
+    return path
+
+
 def _drive_to(stage, start, goal, *, steps, hold=False):
     """Drive the arm from ``start`` toward ``goal`` over ``steps`` ticks via the real ArmCommandGate
     (a slow position-tracked move when hold=False; a still hold at ``goal`` when hold=True), yielding
@@ -153,6 +193,36 @@ def run_residual_bind(stage, args, summary):
         pass
     for _ in _drive_to(stage, lift, lift, steps=args.settle_steps, hold=True):
         pass
+    # AUDIT every tool-side gripper collider's live/proxy state (the mission's carry-disable skips
+    # instance proxies, so surface_plate/cube panels may stay LIVE and coincident with the carton face).
+    audit = _gripper_collider_audit(stage.stage)
+    summary['gripper_colliders'] = audit
+    print('RESIDUAL_BIND gripper_collider_audit: ' + '; '.join(
+        '%s enabled=%s proxy=%s' % (c['name'], c['collision_enabled'], c['instance_proxy']) for c in audit),
+        flush=True)
+    # Optional CONFIRM lever: de-instance + disable ALL tool-side colliders before release (the fix the
+    # mission's _set_carton_collision fails to reach for instance proxies). If the follow then STOPS, the
+    # live panel collider is confirmed as the bind.
+    if args.disable_tool_colliders:
+        from pxr import Usd, UsdPhysics
+        from twin.restock_manipulation.cad_tool import TOOL_SIDE_COLLIDERS
+        n = 0
+        for p in Usd.PrimRange(stage.stage.GetPrimAtPath('/'), Usd.TraverseInstanceProxies()):
+            ps = str(p.GetPath())
+            if p.HasAPI(UsdPhysics.CollisionAPI) and any(('/' + t) in ps for t in TOOL_SIDE_COLLIDERS):
+                real = stage.stage.GetPrimAtPath(p.GetPrimPath()) if p.IsInstanceProxy() else p
+                # de-instance the owning link so the proxy becomes editable, then disable
+                anc = p
+                while anc and anc.IsInstanceProxy():
+                    anc = anc.GetParent()
+                if anc and anc.IsInstanceable():
+                    anc.SetInstanceable(False)
+                tp = stage.stage.GetPrimAtPath(ps)
+                if tp and tp.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI(tp).CreateCollisionEnabledAttr(False); n += 1
+        print('RESIDUAL_BIND disable_tool_colliders: disabled %d tool-side collider(s) (confirm lever)' % n, flush=True)
+    if args.rest_support:
+        _author_support_box(stage.stage, stage.carton, np.asarray(stage.carton_half, float)[2])
     samples = []
     t0 = time.monotonic()
     tick = 0
@@ -360,6 +430,13 @@ def main():
     p.add_argument('--lift-steps', type=int, default=60, help='ticks of the post-release further lift (slow)')
     p.add_argument('--lift-frac', type=float, default=0.3,
                    help='further-lift goal = lift + lift_frac*(lift-grasp); ~0.3 ~= a 60 mm pad rise')
+    p.add_argument('--rest-support', action='store_true',
+                   help='author a static support box flush under the carton so it RESTS (does not free-fall) '
+                        'with the pad coincident -- reproduces the mission set-down geometry')
+    p.add_argument('--disable-tool-colliders', action='store_true',
+                   help='CONFIRM lever: de-instance + disable ALL tool-side gripper colliders before release '
+                        '(the fix the mission carry-disable misses for instance proxies); if the follow stops, '
+                        'the live panel collider is the bind')
     p.add_argument('--destroy-sensing', action='store_true',
                    help='fm380: after the welded baseline, DESTROY the collect-only station cameras '
                         '(source+shelf; keeps cart) and measure VRAM returned (needs --full-cameras)')
