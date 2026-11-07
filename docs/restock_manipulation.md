@@ -587,6 +587,41 @@ Recommended ON values + bounded-GPU acceptance (coldwin91): `docs/examples/place
 CPU proof: `scripts/check_place_descent_reach.py`, `scripts/twin/tests/test_place_descent_reach.py`;
 write-up: `data/sim-place-descent-reach-cage-v1/report.md`.
 
+#### Separate the approach from the reorientation (sim-place-pad-down-arrival-v1)
+
+coldwin92 (honest seat gate + both cage gates live) exposed the last contradiction of the **single**-standoff
+design: every pre-place standoff whose carried **approach** keeps the carton level is on the **carry-connected**
+(low `wrist_2`) branch, whose straight descent **rakes the mouth posts** (correctly refused — `… all
+descent-infeasible`); the only cage-clear descent holds the **pad-down** (high `wrist_2` ≈ 1.6) branch, which the
+approach **cannot reach level** (the fallback tilted the carton **13.96°** → `CARTON_LEVEL_PLAN_REJECTED` →
+`HOST_FAULT_ESTOP phase=preplace`). This resolves that **open question** above by **separating** the approach from
+the reorientation.
+
+- **CPU finding** (`scripts/check_place_pad_down_arrival.py`, controller `gripper_pad_tcp` frame): the reorientation
+  from the carry-wrist arrival to the pad-down branch is a ~73° rotation of the carton **about the vertical axis**
+  (yaw 155°→82°), which keeps it **level**. An in-place reorientation **directly over the seat** rakes `post_2`
+  at every height (the post is tall, z[−0.196, 1.254]; raising to clear it degenerates the level IK above ~0.40 m).
+  But reorienting in the **open approach corridor** — the standoff shifted `pad_down_arrival_shift_m` toward the arm
+  base + `pad_down_arrival_height_m` above the seat — keeps the housing clear of the mouth posts. The shift **alone**
+  is not enough (the carry-wrist arrival's own descent there is only +18.6 mm, below the 30 mm gate).
+- **The three stages** (`carton_level.place_pad_down_arrival`; requires `place_from_above` + `level_place` + the wired
+  `place_descent_cage_gate`; opt-in, default off ⇒ byte-identical): **(a)** carried approach to the **shifted**
+  above-shelf standoff on the carry-connected arrival branch (`_preplace_above_place_goal`, `PREPLACE_ABOVE_PAD_DOWN`;
+  the straight-descent feasibility filter is disabled in pad-down mode); **(b)** the in-place **reorientation** to the
+  cage-clear pad-down branch (`_issue_pad_down_reorient` / `place_reorient.select_pad_down_branch` +
+  `plan_level_world_approach(anchor='seeded')` — the carry-wrist and pad-down branches are distinct wrist-flip IK
+  solutions, so a **branch-continuous** seeded ramp is required; a naive re-leveler jumps 1.568 rad), gated on tilt
+  **and continuity** (wrist step) **and** the same descent cage sweep, a short slow `begin_joint_path`
+  (`PLACE_REORIENT`); a reorientation the gates refuse `_fail`s by name (`PLACE_REORIENT_REJECTED`); **(c)** the PR 376
+  `place_from_above` descent + descent cage gate + the PR 375 seat gate, from the pad-down pose.
+- **CPU-proven** at every cw64–cw92 park (default `shift=0.20 m` / `height=0.10 m`): reorient **0.04°** / step
+  **0.080 rad** / ≥ +66 mm cage, descent **1.25°** / ≥ +103 mm cage (the **untouched** 2.0° bound), carton on the
+  **0.9325** world seat; the old single-standoff descent is **refused**.
+
+Recommended ON values (coldwin94): `docs/examples/place-pad-down-arrival-fragment.json`; CPU proof:
+`scripts/check_place_pad_down_arrival.py`, `scripts/twin/tests/test_place_reorient.py`,
+`scripts/twin/tests/test_place_pad_down_arrival.py`; write-up: `data/sim-place-pad-down-arrival-v1/report.md`.
+
 ## Contact-gated place-descent release (sim-place-release-on-contact-v1)
 
 The collect deck set-down releases the weld the instant the support is **actually touched**, not at a

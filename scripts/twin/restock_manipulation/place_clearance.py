@@ -666,3 +666,32 @@ def place_descent_cage_clearance_provider(urdf_path, xrdf_path, cart_pose, *, bo
         return place_descent_sweep_reject(per_body, margin=margin)
 
     return _gate
+
+
+# ------------------------- pad-down-branch ranking clearance (sim-place-pad-down-arrival-v1)
+def place_descent_cage_min_clearance_provider(urdf_path, xrdf_path, cart_pose, *, bodies=None,
+                                              include=None, cal_offset_m=0.0, support=SUPPORT_BODIES):
+    """Build the ``callable(waypoints) -> float`` returning the MINIMUM cuMotion-arm-sphere clearance (m)
+    to any NON-support cart cage body over a set of waypoints (sim-place-pad-down-arrival-v1). The
+    pad-down-branch selector (``place_reorient.select_pad_down_branch``) uses it to RANK the cage-clear
+    branches by how clear their descent is -- the SAME arm-sphere sweep as
+    :func:`place_descent_cage_clearance_provider`, exposing the margin instead of a pass/fail verdict.
+    Returns ``+inf`` for an empty waypoint list (no constraint). Mirrors the gate provider's arguments."""
+    from twin.restock_manipulation.cart_world_obstacle import cart_pose_matrix
+    if bodies is None:
+        bodies = rollwagen_collider_boxes()
+    keep = cage_body_names(bodies) if include is None else list(include)
+    T_base_cart = cart_pose_matrix(cart_pose)
+    support_set = set(support)
+
+    def _clear(waypoints):
+        if not waypoints:
+            return float('inf')
+        per_body = preplace_cage_arm_clearance(waypoints, urdf_path, xrdf_path, bodies, T_base_cart,
+                                               include=keep)
+        if cal_offset_m:
+            per_body = {k: v - float(cal_offset_m) for k, v in per_body.items()}
+        vals = [v for k, v in per_body.items() if k not in support_set]
+        return float(min(vals)) if vals else float('inf')
+
+    return _clear

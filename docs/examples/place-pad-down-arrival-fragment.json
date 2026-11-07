@@ -1,0 +1,39 @@
+{
+  "_comment": "sim-place-pad-down-arrival-v1 (coldwin92). The opt-in THREE-STAGE collect-deck set-down that SEPARATES the carried approach from the gripper reorientation. ON values below are for coldwin94 (the coldwin92 relaunch). Default off => byte-identical with coldwin92/93.",
+
+  "_the_contradiction": "coldwin92 (honest seat gate PR 375 + both cage gates PR 376/377 live) proved the single-standoff place has NO solution: every carry-connected standoff whose carried APPROACH keeps the carton level is on the LOW-wrist_2 CARRY branch, whose straight place descent rakes the +x mouth posts (correctly refused: PREPLACE_REACTION_BRANCH unsolved ... all descent-infeasible); the only CAGE-CLEAR descent holds the HIGH-wrist_2 PAD-DOWN branch (wrist_2 ~ 1.6), which the carried approach cannot reach LEVEL (the fallback tilted the carton 13.96 deg -> CARTON_LEVEL_PLAN_REJECTED -> HOST_FAULT_ESTOP phase=preplace at collect step 5 'place'). The approach and the reorientation must be SEPARATED.",
+
+  "_cpu_finding": "data/sim-place-pad-down-arrival-v1 (scripts/check_place_pad_down_arrival.py, in the controller gripper_pad_tcp frame -- its rotation equals ur_tool0 so leveling is frame-independent, its ~0.27 m horizontal offset shifts the IK targets so the proof runs in the real frame). The reorientation from the carry-wrist arrival to the pad-down branch is a ~73 deg rotation of the carton ABOUT THE VERTICAL axis (yaw 155->82), which keeps it LEVEL. An in-place reorientation directly over the seat RAKES post_2 at EVERY height (the post is tall, z[-0.196,1.254]; raising to clear it degenerates the level IK above ~0.40 m). But reorienting in the OPEN APPROACH CORRIDOR -- the standoff shifted pad_down_arrival_shift_m toward the arm base + pad_down_arrival_height_m above the seat -- keeps the housing clear of the mouth posts. At the default 0.20 m / 0.10 m: reorient tilt <= 0.04 deg + branch-continuous (wrist step <= 0.080 rad, the soft wrist tracks it) cage >= +66 mm, descent tilt <= 1.25 deg cage >= +103 mm, carton lands at the 0.9325 world seat, at EVERY cw64-cw92 park. The shift ALONE is NOT enough (the carry-wrist arrival's own descent at the shifted standoff is only +18.6 mm, below the 30 mm gate) -- the reorientation to the higher-clearance pad-down branch is REQUIRED.",
+
+  "_the_three_stages": "(a) carried approach to the SHIFTED above-shelf standoff on the carry-connected ARRIVAL branch (the existing selector; in pad-down mode the straight-descent feasibility filter is disabled, the reorientation handles the branch switch) -- controller._preplace_above_place_goal (PREPLACE_ABOVE_PAD_DOWN engaged). (b) the in-place REORIENTATION controller._issue_pad_down_reorient: place_reorient.select_pad_down_branch picks the cage-clear pad-down branch (ranked by descent clearance), plan_level_world_approach(anchor='seeded') plans the BRANCH-CONTINUOUS leveled reorientation (the carry-wrist arrival and the pad-down branch are distinct wrist-flip IK solutions -- a naive per-waypoint re-leveler bridges them with a ~1.5 rad jump the soft wrist cannot track; the seeded solve ramps wrist_2 monotonically, densifying so every step <= 0.15 rad), gated on tilt (<= bound) AND continuity (wrist step) AND the SAME descent cage sweep; driven as a short slow begin_joint_path (PLACE_REORIENT phase=place ...). (c) the PR 376 place_from_above descent + the descent cage gate + the PR 375 seat gate for release, now from the pad-down pose.",
+
+  "_requires": "place_from_above:true + level_place:true (validated at boot) AND the wired place_descent_cage_gate (the reorientation refuses by name without a cage criterion). The reorientation reuses the SAME descent cage gate + its min-clearance closure (place_cage_wiring installs both). Default off => the single-standoff place is unchanged (byte-identical).",
+
+  "carton_level": {
+    "_existing": "Keep the coldwin92/93 carton_level keys (preplace_level_gate, preplace_reaction_branch, preplace_branch_prefer_carry_connected, preplace_seeded_interior, preplace_above_support, place_from_above:true, place_release_on_contact:true, place_seat_gate:true + place_seat_tol_m, release_cancel_handshake, release_reissue, release_free_check, closed_loop_*, gravity_compensation, ...). preplace_descent_feasible may stay true -- it is IGNORED in pad-down mode (the straight-descent predictor is disabled there).",
+
+    "place_pad_down_arrival": true,
+    "_place_pad_down_arrival_note": "THE FIX. Run the three-stage set-down (shifted arrival -> pad-down reorientation -> descent). Requires place_from_above + level_place + the wired place_descent_cage_gate. Default off => byte-identical.",
+    "pad_down_arrival_shift_m": 0.20,
+    "_shift_note": "the reorientation standoff is shifted this far toward the arm base (the horizontal direction out of the cage mouth) so the housing orbits IN FRONT of the mouth posts during the ~73 deg reorientation. 0.20 m gives >= +66 mm reorient cage margin at every cw park (0.15 m gives only +32 mm -- too thin against the CPU-vs-sim arm-sphere offset; a larger shift is also EASIER for the carried approach, which is less extended).",
+    "pad_down_arrival_height_m": 0.10,
+    "_height_note": "the reorientation standoff carton clearance above the seat. 0.10 m matches the from-above via clearance.",
+    "pad_down_reorient_waypoints": 12,
+    "pad_down_reorient_speed": 0.04,
+    "pad_down_reorient_accel": 0.08,
+    "_reorient_motion_note": "the reorientation is a short, slow leveled begin_joint_path (carton kept within the UNTOUCHED 2.0 deg bound throughout, CPU-proven per waypoint with the same predictor + cage gate the place dispatch uses)."
+  },
+
+  "place_descent_cage_gate": {
+    "_note": "UNCHANGED from coldwin92 -- the SAME wired descent cage gate block (cart_pose + pre-baked collider_boxes + margin 0.03). The pad-down reorientation reuses it for its cage criterion AND the branch-selection clearance ranking (place_cage_wiring also installs the min-clearance closure). A cart_pose is required.",
+    "cart_pose": "[keep the coldwin92 4x4 cart-body -> ur_base_link]",
+    "margin": 0.03,
+    "collider_boxes": "[keep the coldwin92 pre-baked cart-frame AABBs]"
+  },
+
+  "_expected_log": "PREPLACE_ABOVE_PAD_DOWN engaged (the shifted standoff) -> the carried approach reaches it level -> PLACE_REORIENT phase=place chosen pad-down wrist_2=~1.66 descent_clearance=~100mm predicted_max roll/pitch <= 2.0 -> PLACE_REORIENT done (arm at the pad-down branch) -> the place descent runs cage-clear to the seat (CARTON_LEVEL_PLACE_DESCENT) -> PLACE_SEAT_GATE_ARM / release at the true set-down. A PLACE_REORIENT_REJECTED names an infeasible reorientation (no cage-clear pad-down branch / the reorientation cannot stay level) -- the next lever (a different pad geometry / side-mouth insertion), never blind motion.",
+
+  "_cpu_proof": "PYTHONPATH=scripts <usd-core-python> scripts/check_place_pad_down_arrival.py (exit 0: the three-stage chain clears + stays level + reaches the seat at every cw64-cw92 park AND the old single-standoff descent is refused). Unit + boot-path + stage-runs tests: scripts/twin/tests/test_place_reorient.py, test_place_pad_down_arrival.py, test_place_cage_wiring.py.",
+
+  "_bounded_gpu_proof": "Re-run the coldwin92 config with this block merged (place_pad_down_arrival:true + the shift/height in the HOST carton_level block; the descent cage gate already wired) through scripts/run_mobile_restock.py under /tmp/aile-gpu.lock (HEAVY_MB=2500 for whispr). The complete-run video needs the carton to reach the seat; if a PLACE_REORIENT_REJECTED fires, the next lever (pad geometry / side-mouth insertion) is the follow-up lane. Out of scope: the pick, pre-place approach continuity, tow, transfer, any bound change."
+}
