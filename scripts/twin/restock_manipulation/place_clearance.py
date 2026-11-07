@@ -477,6 +477,114 @@ def clearance_summary(per_body_min, *, support=SUPPORT_BODIES, worst_n=4):
     return '%s min non-support: %s | support: %s' % (PLACE_CLEARANCE, fmt(nonsupport), fmt(sup))
 
 
+# ---------------------------------- monotonic carton-z descent guard (sim-place-descent-reach-executed-vs-planned-v1)
+# coldwin103 dispatched the first real pad-down collect set-down since cw98 and it did NOT reach the shelf.
+# The executed arm TRACKED the dispatched TRAJ_HOST_PLAN to < 1 mm (FK of the CARTON_TICK joints vs the plan
+# at matched elapsed), but the dispatched PLAN's FK carton CENTRE z is NON-MONOTONIC: it drops 7 mm then
+# RISES to +10.6 mm above the standoff over its first 8 of 13 waypoints, holding up through ~t=28 s, and only
+# dives to the seat in the last 4 waypoints -- so the run was declared PLACE_OBSTRUCTED at the hump before the
+# real descent ran. CAUSE (CPU-reproduced in data/sim-place-descent-reach-executed-vs-planned-v1): the BASE
+# ``carton_level.plan_compensated_place_descent`` output is monotonic and reaches the seat; the hump is added
+# AFTER by the sensor-anchored closed-loop servo (``carton_level.CartonLevelServo.correct_path_sensor_anchored``,
+# ``closed_loop_sensor``), which saturates the +-3 deg wrist authority and swings the ~0.19 m-laterally-offset
+# welded carton up ~10.7 mm. This guard caps that excursion to the monotonic base envelope.
+PLACE_DESCENT_MONOTONIC_Z = 'PLACE_DESCENT_MONOTONIC_Z'
+
+
+def carton_centre_z(robot, config, geom, *, root='ur_base_link'):
+    """FK carton-CENTRE z (m, ``root`` frame) of the welded carton at arm ``config`` -- the quantity the
+    measured place descent lowers (``placed_pose[2]``, up to a constant FK<->sim calibration offset). The
+    same ``_carton_in_base`` welded-carton offset the drooped clearance sweep uses. Pure/CPU (URDF FK)."""
+    return float(_carton_in_base(robot, config, geom, root=root)[2, 3])
+
+
+def enforce_monotonic_carton_z(robot, final_waypoints, base_waypoints, geom, *, root='ur_base_link',
+                               z_tol=0.001, blend_iters=48, carton_z_fn=None):
+    """Cap a place-descent waypoint path's FK carton-centre z to a MONOTONICALLY non-increasing descent to
+    the seat, blending any corrected waypoint that ROSE back toward the (monotonic, seat-reaching) BASE plan.
+
+    ``final_waypoints``: the dispatched (closed-loop-corrected) descent waypoints (list of ARM-order
+    6-vectors). ``base_waypoints``: the PRE-correction ``plan_compensated_place_descent`` output -- the
+    monotonic descent reference the controller still holds. ``geom``: the ``GripperCartonGeometry`` whose
+    offset back-computes the carton centre from the ``suction_cups`` FK. For each waypoint i >= 1 whose FK
+    carton centre z rises above BOTH the running minimum AND the base plan's carton z at i (within ``z_tol``),
+    blend it toward its base counterpart by the smallest fraction that restores ``carton_z <= min(running,
+    base_z[i]) + z_tol``. The first waypoint (pinned to the arm's measured start) is never moved. The cap is
+    ONE-SIDED: a corrected waypoint whose carton z is already at/below the cap (a servo correction that LOWERS
+    the carton toward level, or an untouched descent point) is kept verbatim, so the closed-loop leveling that
+    helps is preserved and only the harmful upward swing is removed. If the capped path is still not
+    monotonic (a rare servo-push-BELOW-base interaction), fall back to the base plan verbatim -- it is
+    monotonic, reaches the seat and is within the tilt bound by construction.
+
+    ``carton_z_fn`` optionally overrides the FK carton-centre-z evaluation (a ``callable(waypoint)->float``);
+    default ``None`` uses :func:`carton_centre_z` on ``robot``/``geom``. The override lets a pure CPU test
+    exercise the capping algorithm with an analytic carton-z, no URDF needed.
+
+    Returns ``(adjusted_waypoints, report)`` where ``report`` is a dict with ``mode`` ('noop' | 'capped' |
+    'fallback_base'), ``n_adjusted``, ``max_rise_mm_before`` / ``max_rise_mm_after`` (max carton rise above
+    the standoff), ``final_descent_mm`` (standoff carton z minus the last waypoint's) and ``monotonic_after``.
+    Pure/CPU. Raises ValueError on a length mismatch / < 2 waypoints so a caller bug fails loudly."""
+    fin = [list(w) for w in final_waypoints]
+    base = [list(w) for w in base_waypoints]
+    if len(fin) != len(base):
+        raise ValueError('enforce_monotonic_carton_z: final/base waypoint counts differ (%d vs %d)'
+                         % (len(fin), len(base)))
+    if len(fin) < 2:
+        raise ValueError('enforce_monotonic_carton_z needs at least two waypoints (standoff + set-down)')
+    tol = float(z_tol)
+
+    if carton_z_fn is not None:
+        def cz(w):
+            return float(carton_z_fn(list(w)))
+    else:
+        def cz(w):
+            return carton_centre_z(robot, w, geom, root=root)
+
+    base_z = [cz(w) for w in base]
+    fin_z = [cz(w) for w in fin]
+    z0 = fin_z[0]
+    max_rise_before = max(0.0, max(fin_z) - z0)
+
+    out = [list(fin[0])]
+    running = fin_z[0]
+    n_adj = 0
+    for i in range(1, len(fin)):
+        f = np.asarray(fin[i], float)
+        b = np.asarray(base[i], float)
+        cap = min(running, base_z[i]) + tol
+        if cz(f) <= cap:
+            w = f
+        else:
+            lo, hi = 0.0, 1.0            # blend fraction: 0 = corrected, 1 = base (base_z[i] <= cap always)
+            for _ in range(int(blend_iters)):
+                mid = 0.5 * (lo + hi)
+                if cz((1.0 - mid) * f + mid * b) <= cap:
+                    hi = mid
+                else:
+                    lo = mid
+            w = (1.0 - hi) * f + hi * b
+            n_adj += 1
+        out.append([float(v) for v in w])
+        running = min(running, cz(out[-1]))
+
+    adj_z = [cz(w) for w in out]
+    monotonic = all(adj_z[i + 1] <= adj_z[i] + 1e-4 for i in range(len(adj_z) - 1))
+    if not monotonic:
+        out = [list(w) for w in base]
+        adj_z = list(base_z)
+        monotonic = all(adj_z[i + 1] <= adj_z[i] + 1e-4 for i in range(len(adj_z) - 1))
+        mode = 'fallback_base'
+        n_adj = len(fin) - 1
+    else:
+        mode = 'capped' if n_adj > 0 else 'noop'
+    report = {'mode': mode, 'n_adjusted': int(n_adj),
+              'max_rise_mm_before': round(1000.0 * max_rise_before, 2),
+              'max_rise_mm_after': round(1000.0 * max(0.0, max(adj_z) - adj_z[0]), 2),
+              'final_descent_mm': round(1000.0 * (adj_z[0] - adj_z[-1]), 2),
+              'monotonic_after': bool(monotonic)}
+    return out, report
+
+
 # -------------------- carried pre-place leg-2 pan-sweep vs the cart cage (sim-preplace-sweep-cage-clearance-v1)
 # The place-clearance sweep above checks the welded carton + suction PAD at the SET-DOWN. The carried
 # PRE-PLACE leg-2 (PREPLACE_WRIST_FIRST "move hold joints to standoff") swings the whole end-effector on a

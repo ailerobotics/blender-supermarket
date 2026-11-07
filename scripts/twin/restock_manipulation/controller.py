@@ -3903,6 +3903,38 @@ class TransferController:
                             waypoints = list(plan.waypoints)
                             waypoints, cl_peak = self._closed_loop_correct_descent(
                                 robot, waypoints, gc, tcp_link, measured_start=s.joint_positions)
+                            # sim-place-descent-reach-executed-vs-planned-v1 (coldwin103): the MONOTONIC
+                            # carton-z guard. The closed-loop correction above (sensor-anchored servo) can
+                            # SATURATE the wrist authority and swing the laterally-offset welded carton UP,
+                            # making the dispatched descent's FK carton centre z RISE +10.6 mm over its first
+                            # 8 waypoints before diving -- the arm then tracks that hump and the set-down is
+                            # declared obstructed above the seat before the real descent runs. When
+                            # place_descent_monotonic_z is on, cap the correction's upward carton-z excursion
+                            # back to the monotonic BASE plan (plan.waypoints, pre-correction), so the
+                            # dispatched descent is monotonically non-increasing to the seat. One-sided (a
+                            # correction that lowers the carton toward level is kept) and falls back to the
+                            # base plan on any residual non-monotonicity. Default off => the corrected path is
+                            # unchanged (byte-identical). PR 382's seat gate + PR 387's stall arming unchanged.
+                            if getattr(self._carton_level, 'place_descent_monotonic_z', False):
+                                from twin.restock_manipulation import place_clearance as _pcz
+                                try:
+                                    _geom = _pcz.GripperCartonGeometry.shipped()
+                                    waypoints, _mz = _pcz.enforce_monotonic_carton_z(
+                                        robot, [list(w) for w in waypoints],
+                                        [list(w) for w in plan.waypoints], _geom,
+                                        root='ur_base_link',
+                                        z_tol=float(self._carton_level.place_descent_monotonic_z_tol_m))
+                                    print('%s phase=place armed mode=%s n_adjusted=%d max_rise_before=%.1fmm '
+                                          'max_rise_after=%.1fmm final_descent=%.1fmm monotonic=%s '
+                                          '(cap the closed-loop servo upward carton-z swing to the monotonic '
+                                          'base descent; z_tol=%.3f m)'
+                                          % (_pcz.PLACE_DESCENT_MONOTONIC_Z, _mz['mode'], _mz['n_adjusted'],
+                                             _mz['max_rise_mm_before'], _mz['max_rise_mm_after'],
+                                             _mz['final_descent_mm'], _mz['monotonic_after'],
+                                             self._carton_level.place_descent_monotonic_z_tol_m), flush=True)
+                                except (ValueError, KeyError) as _mzexc:
+                                    print('%s skipped (guard error: %s; the corrected descent path owns it)'
+                                          % (_pcz.PLACE_DESCENT_MONOTONIC_Z, _mzexc), flush=True)
                             # sim-place-descent-residual-v3: latch the contact-triggered weld-release
                             # threshold for this set-down. The welded carton descends from the standoff by the
                             # planned TCP drop; when its live measured centre z (placed_pose) reaches within

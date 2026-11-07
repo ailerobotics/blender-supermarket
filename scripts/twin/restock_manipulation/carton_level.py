@@ -911,6 +911,31 @@ class LevelConfig:
     place_housing_seat: bool = False
     housing_seat_lip_overhang_m: float = 0.0
     housing_seat_z_lift_m: float = 0.0
+    # sim-place-descent-reach-executed-vs-planned-v1 (coldwin103): the MONOTONIC carton-z guard. coldwin103
+    # dispatched the first real pad-down set-down since cw98 and it did NOT reach the shelf: the executed arm
+    # TRACKED the dispatched plan to < 1 mm (FK of the CARTON_TICK joints vs the TRAJ_HOST_PLAN at matched
+    # elapsed: max joint error 0.011 rad), but the dispatched PLAN itself does not descend for its first 8 of
+    # 13 waypoints -- the FK carton CENTRE z goes DOWN 7 mm, then UP to +10.6 mm above the standoff (point 6,
+    # t=20.9 s), holding up through point 8 (t=28.1 s), and only dives to the seat in points 9-12. The run was
+    # declared PLACE_OBSTRUCTED at t=28.6 s, right at the hump, before the real descent could run. CAUSE
+    # (CPU-reproduced, data/sim-place-descent-reach-executed-vs-planned-v1): the BASE
+    # ``plan_compensated_place_descent`` output is MONOTONIC and reaches the seat; the hump is introduced AFTER
+    # by ``_closed_loop_correct_descent`` -- the sensor-anchored closed-loop servo (``closed_loop_sensor``)
+    # drives the +-``closed_loop_authority_deg`` (3 deg) wrist authority to SATURATION trying to null a
+    # start-anchored attitude bias, and the saturated wrist bend swings the ~0.19 m-laterally-offset welded
+    # carton UP ~10.7 mm during the extension (CPU replay reproduces the dispatched hump desc_mm +7.5/+3.9/
+    # +0.3/-3.3/-7.0/-10.7 to ~1 mm). With ``place_descent_monotonic_z`` on, the controller caps the
+    # closed-loop correction's UPWARD carton-z excursion to the monotonic base-descent envelope AFTER the
+    # correction (``place_clearance.enforce_monotonic_carton_z``): each corrected waypoint whose FK carton
+    # centre z rises above both the running minimum AND the base plan's carton z (within
+    # ``place_descent_monotonic_z_tol_m``) is blended back toward its base counterpart just enough to restore a
+    # monotonically non-increasing descent to the seat. The cap is ONE-SIDED (a servo correction that LOWERS
+    # the carton toward level is kept); a residual non-monotonicity falls back to the base plan (monotonic +
+    # seat-reaching + within the tilt bound). The logged ``PLACE_DESCENT_MONOTONIC_Z`` line names the
+    # before/after max carton rise. Keeps PR 382's seat gate as the release authority and PR 387's stall arming
+    # unchanged. Default OFF => the dispatched (possibly humped) closed-loop path is unchanged (byte-identical).
+    place_descent_monotonic_z: bool = False
+    place_descent_monotonic_z_tol_m: float = 0.001
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -1099,6 +1124,11 @@ class LevelConfig:
             if not isinstance(self.gravity_compensation, GravityCompensation):
                 raise ValueError('carton_level.gravity_compensation must resolve to a GravityCompensation')
             self.gravity_compensation.validate()
+        # sim-place-descent-reach-executed-vs-planned-v1
+        if not (math.isfinite(self.place_descent_monotonic_z_tol_m)
+                and self.place_descent_monotonic_z_tol_m >= 0):
+            raise ValueError('carton_level.place_descent_monotonic_z_tol_m must be a finite non-negative '
+                             'number of metres (the carton-z slack the monotonic descent guard tolerates)')
         return self
 
     def preplace_support_clearance(self):
@@ -1152,7 +1182,8 @@ def resolve_level_config(spec):
                  'preplace_soft_effort_nm', 'preplace_branch_select_budget_s',
                  'pad_down_arrival_shift_m', 'pad_down_arrival_height_m',
                  'pad_down_reorient_speed', 'pad_down_reorient_accel',
-                 'housing_seat_lip_overhang_m', 'housing_seat_z_lift_m'):
+                 'housing_seat_lip_overhang_m', 'housing_seat_z_lift_m',
+                 'place_descent_monotonic_z_tol_m'):
         if fnum in spec and spec[fnum] is not None:
             kw[fnum] = float(spec[fnum])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
@@ -1163,7 +1194,7 @@ def resolve_level_config(spec):
                  'preplace_descent_feasible',
                  'place_release_on_contact', 'release_cancel_handshake', 'release_reissue',
                  'release_free_check', 'place_seat_gate', 'place_pad_down_arrival',
-                 'place_housing_seat'):
+                 'place_housing_seat', 'place_descent_monotonic_z'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     # sim-place-release-on-contact-v1 / sim-place-release-cancel-handshake-v1 / sim-release-open-reissue-v1

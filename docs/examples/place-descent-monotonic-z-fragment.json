@@ -1,0 +1,32 @@
+{
+  "_comment": "sim-place-descent-reach-executed-vs-planned-v1. Purpose: the coldwin103 collect pad-down set-down did NOT reach the shelf. Diagnosis (CPU, no GPU): the executed arm TRACKED the dispatched TRAJ_HOST_PLAN faithfully (FK of the recorded CARTON_TICK joints vs the plan at matched elapsed <= 0.011 rad per joint; FK-of-executed carton centre reproduces the recorded PLACE_RELEASE_TICK carton_z to < 1 mm), but the dispatched PLAN itself does not descend: its FK carton-centre z drops 7 mm then RISES to +10.6 mm above the standoff over its first 8 of 13 waypoints, holding up through ~t=28 s, and only dives to the seat in the last 4 -- so the run was declared PLACE_OBSTRUCTED at t=28.6 s, at the hump, before the real descent ran. This fragment arms the fix.",
+
+  "_cause": "The BASE plan_compensated_place_descent output is MONOTONIC and reaches the seat; the hump is added AFTER by the sensor-anchored closed-loop servo (carton_level.closed_loop_sensor -> CartonLevelServo.correct_path_sensor_anchored). It drives the +-closed_loop_authority_deg (3 deg) wrist authority to SATURATION trying to null a start-anchored attitude bias, and the saturated wrist bend swings the ~0.19 m-laterally-offset welded carton up ~10.7 mm. CPU replay reproduces the dispatched hump desc_mm +7.5/+3.9/+0.3/-3.3/-7.0/-10.7 to ~1 mm (data/sim-place-descent-reach-executed-vs-planned-v1).",
+
+  "_fix": "carton_level.place_descent_monotonic_z caps the closed-loop correction's UPWARD carton-z excursion back to the monotonic base descent AFTER the correction (place_clearance.enforce_monotonic_carton_z): each corrected waypoint whose FK carton centre z rises above BOTH the running minimum AND the base plan's carton z (within place_descent_monotonic_z_tol_m) is blended back toward its base counterpart just enough to restore a monotonically non-increasing descent to the seat. ONE-SIDED (a servo correction that LOWERS the carton toward level is kept); a residual non-monotonicity falls back to the base plan (monotonic + seat-reaching + within the 2.0 deg tilt bound). CPU-proven: the humped cw103 descent (max rise 10.7 mm, lands +18.9 mm above the seat before stalling) -> monotonic (max rise 0.0 mm), reaches the seat within 1 mm, tilt back to the base 1.28 deg (the servo had pushed it to 3.04 deg). Default off => byte-identical.",
+
+  "_pr383_reconciliation": "PR 383's check_pad_down_shelf_contact.py claimed the housing was -52..-59 mm INTO the shelf from the first waypoint, while physics saw NO contact (CONTACT_PAIR 0). The replay's base-z calibration anchors on place_clearance._carton_in_base (the side-grip pad model), which places the carton centre +124.6 mm too high in ur_base (FK 0.7642 vs the measured placed_pose 0.6396), so the calibrated arm base sits 124.6 mm too LOW and the housing reads deep into the shelf. Anchoring on the MEASURED carton centre (ground truth) puts the housing +75..+94 mm CLEAR at every waypoint cw103 actually executed (wp0-8); only the never-reached deepest wp12 reads -16.8 mm, within the conservative XRDF-sphere + composed-AABB calibration noise (the housing SKIMS the board as the carton lands). The PHYSICS is right: cw103 did not reach the shelf because of the non-monotonic HUMP, not a housing strike. Proof: scripts/check_pad_down_shelf_contact.py (the cw100 replay) + the cw103 base-z reconciliation in the report.",
+
+  "_coldwin104_ON_values_HOST": {
+    "_where": "restock_manipulation/ros_host_config.json (HOST carton_level block) -- the file the mission manip host actually reads (host-vs-runtime-config-split). Add these to the existing carton_level block; everything else (gravity_compensation, place_from_above, closed_loop_level/sensor, place_pad_down_arrival, place_seat_gate, place_release_on_contact + its stall arming, ...) stays exactly as coldwin103 ran it.",
+    "carton_level": {
+      "place_descent_monotonic_z": true,
+      "place_descent_monotonic_z_tol_m": 0.001,
+      "place_release_stall_arming": "progress-lag",
+      "place_seat_gate": true,
+      "place_housing_seat": false
+    }
+  },
+
+  "_coldwin104_ON_values_RUNTIME": {
+    "_where": "the mission-runtime JSON (external to the repo; a worker PR cannot flip it -- coordinate via the status line). As coldwin103: the place_contact_logger (PR 384) stays ON; the place_descent_cage_gate include_support stays OFF (cage-only), housing seat OFF.",
+    "place_contact_logger": true,
+    "place_descent_cage_gate": {"include_support": false}
+  },
+
+  "_expected_console_coldwin104": "At boot: HOST_EFFECTIVE_CONFIG ... 'place_descent_monotonic_z': true (proves the guard armed in the process that consumes it). At the collect place descent, BEFORE begin_joint_path: 'PLACE_DESCENT_MONOTONIC_Z phase=place armed mode=capped n_adjusted=N max_rise_before=10.7mm max_rise_after=0.0mm final_descent=NNN.Nmm monotonic=True (cap the closed-loop servo upward carton-z swing to the monotonic base descent; z_tol=0.001 m)'. The dispatched descent is then monotonic: the CARTON_TICK / PLACE_RELEASE_TICK carton_z should fall steadily from the standoff to the seat (no +10 mm hump), reach PLACE_SEAT_GATE_ARM seat_center_z within seat_tol, and the PR 382 seat gate -- unchanged -- fires the release at the seat instead of PLACE_OBSTRUCTED above it.",
+
+  "_cpu_proof": "scripts/twin/tests/test_place_descent_monotonic_z_v1.py: the pure capping algorithm (hump -> monotonic, noop on a monotonic path, one-sided keep of a downward correction, length guards); the coldwin103 diagnosis (executed tracked the plan < 0.02 rad; the dispatched plan FK is non-monotonic); the fix (regen base monotonic + reaches seat; servo reproduces the hump; guard -> monotonic + reaches seat within 0.020 + tilt <= 2.0); and the wiring on/off through resolve_level_config + the controller + the ros_host HOST_EFFECTIVE_CONFIG surface. Write-up: data/sim-place-descent-reach-executed-vs-planned-v1/report.md.",
+
+  "_scope": "Only the COLLECT pad-down place descent waypoint dispatch. PR 382's seat gate stays the release authority and PR 387's stall arming is unchanged. Every switch is opt-in and default-off => a run without place_descent_monotonic_z is byte-identical. The reach MARGIN note: with the hump removed the monotonic descent lands ~1 mm from the modelled seat on CPU; PR 385's lip seat (0.28 m toward the arm base, tested on coldwin104 in parallel) would move the seat target but is orthogonal to this guard -- the guard enforces monotonicity to WHATEVER seat the descent targets."
+}
