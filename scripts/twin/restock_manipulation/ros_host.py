@@ -566,6 +566,10 @@ def main():
         # transform is armed (the 'PLACE_HOUSING_SEAT armed' log above carries the overhang / z-lift).
         'place_housing_seat': (controller._carton_level is not None
                                and getattr(controller._carton_level, 'place_housing_seat', False)),
+        # sim-place-descent-stall-false-start-v1: the EFFECTIVE place-descent stall arming (None => the
+        # legacy raw no-progress stall; the 'PLACE_STALL_ARMING armed' line above carries the thresholds).
+        'place_release_stall_arming': (getattr(controller._carton_level, 'place_release_stall_arming', None)
+                                       if controller._carton_level is not None else None),
     }), flush=True)
     # sim-collision-dt-render-lead-floor-v1: log the DERIVED collision/feedback freshness band once at
     # host start, so every run dir's host-stack.log records the floor/ceiling in force (the future-lead

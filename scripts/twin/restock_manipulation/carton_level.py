@@ -339,6 +339,27 @@ def place_descent_drop_m(robot, waypoints, *, tool_link='ur_tool0', root='ur_bas
     return max(0.0, z0 - z1)
 
 
+def place_descent_time_knots(robot, waypoints, *, speed=0.02, accel=0.04,
+                             tool_link='ur_tool0', root='ur_base_link'):
+    """sim-place-descent-stall-false-start-v1: the PLANNED-descent knot table for the dispatched place
+    descent -- ``(knot_times, knot_descents)`` -- built from the plan waypoints and the host executor's
+    rest-to-rest cubic segment sizing (``place_release.waypoint_segment_times``). ``knot_times[i]`` is the
+    cumulative sim time at waypoint ``i`` (``knot_times[0] == 0.0`` at the standoff); ``knot_descents[i]``
+    is the planned carton descent at waypoint ``i`` -- the TCP-z DROP from the standoff (``max(0, z0 -
+    zi)``; the welded leveled carton tracks the TCP, so carton descent == TCP drop). Feeds a
+    ``place_release.PlannedDescent`` the controller passes to the release decider so a render-paced
+    descent-START window (the carton has not moved because the plan's long rest-to-rest first segment has
+    barely begun -- coldwin100) is not read as a stall. Pure/CPU (FK + the pure timing helper); ``speed`` /
+    ``accel`` are the dispatched ``place_descent_speed`` / ``place_descent_accel``."""
+    from twin.restock_manipulation.place_release import waypoint_segment_times
+    if waypoints is None or len(waypoints) < 2:
+        raise ValueError('place_descent_time_knots needs at least two waypoints (standoff + set-down)')
+    times = waypoint_segment_times(waypoints, speed=speed, accel=accel)
+    z0 = float(tool_position(robot, list(waypoints[0]), tool_link, root)[2])
+    descents = [max(0.0, z0 - float(tool_position(robot, list(w), tool_link, root)[2])) for w in waypoints]
+    return list(times), descents
+
+
 def place_contact_release_z(start_carton_z, drop_m, gap_m):
     """The carton-BOTTOM-frame contact-release height: ``start_carton_z - drop_m + gap_m``. ``start_carton_z``
     is the live carton centre z when the place descent is issued (carton at the standoff), ``drop_m`` the
@@ -739,6 +760,22 @@ class LevelConfig:
     # above the shelf; cw83's slipped free and rested (verify passed) while cw85's was carried off by the
     # retreat and fell to the floor (verify: carton not resting on deck, xy=1.219 bottom_gap=-0.954).
     place_release_stall_height_margin_m: object = None
+    # sim-place-descent-stall-false-start-v1: arm the STALL release trigger only once descent progress was
+    # EXPECTED, so the render-paced descent-START window (the dispatched CARTON_LEVEL_PLACE_DESCENT plan is
+    # deep in its rest-to-rest first segment -- coldwin100 declared the set-down obstructed 83 ms / 5 ticks
+    # after the trajectory dispatch, with carton_z frozen at the descent start, a progress the plan CANNOT
+    # produce) is not read as a stall. None (default) => the legacy raw no-progress stall counter (byte-
+    # identical: the coldwin100 tick sequence still produces action=obstructed). ``'progress-lag'``
+    # (preferred): the stall fires only when the measured carton descent lags the dispatched plan's planned
+    # descent by more than ``place_release_stall_lag_m`` for ``place_release_stall_ticks`` ticks.
+    # ``'descent-begun'`` (fallback): the legacy counter, armed only after the descent has begun (measured
+    # descent >= ``place_release_stall_begun_m`` from the descent-start z) or the ramp grace
+    # ``place_release_stall_arm_grace_s`` (None => the plan's first-segment duration) has elapsed. The EFFORT
+    # trigger is UNCHANGED, so a genuine descent-start jam (coldwin68's cage post) still ends by name.
+    place_release_stall_arming: object = None
+    place_release_stall_lag_m: float = 0.003
+    place_release_stall_begun_m: float = 0.002
+    place_release_stall_arm_grace_s: object = None
     place_release_contact_gap_mm: object = None   # None => the seal-gap contact trigger is off
     place_support_tokens: tuple = ('shelf', 'deck')
     place_obstruction_gap_mm: float = 2.0
@@ -947,6 +984,24 @@ class LevelConfig:
             raise ValueError('carton_level.place_release_stall_height_margin_m must be None or a finite '
                              'positive number of metres (the stall release trigger only counts within '
                              'release_z + this of the planned set-down height)')
+        # sim-place-descent-stall-false-start-v1
+        if self.place_release_stall_arming is not None:
+            if str(self.place_release_stall_arming) not in ('progress-lag', 'descent-begun'):
+                raise ValueError("carton_level.place_release_stall_arming must be None, 'progress-lag' or "
+                                 "'descent-begun' (the stall-trigger arming mode)")
+            if not self.place_release_on_contact:
+                raise ValueError('carton_level.place_release_stall_arming requires place_release_on_contact '
+                                 'to be on (it arms the contact-gated place release stall trigger)')
+        for nm, v in (('place_release_stall_lag_m', self.place_release_stall_lag_m),
+                      ('place_release_stall_begun_m', self.place_release_stall_begun_m)):
+            if not (math.isfinite(float(v)) and float(v) > 0):
+                raise ValueError(f'carton_level.{nm} must be a finite positive number of metres')
+        if self.place_release_stall_arm_grace_s is not None and not (
+                math.isfinite(float(self.place_release_stall_arm_grace_s))
+                and float(self.place_release_stall_arm_grace_s) > 0):
+            raise ValueError('carton_level.place_release_stall_arm_grace_s must be None or a finite '
+                             'positive number of sim seconds (the descent-begun ramp grace; None => the '
+                             "dispatched plan's first-segment duration)")
         # sim-release-open-reissue-v1
         if not (math.isfinite(float(self.release_confirm_timeout_s)) and float(self.release_confirm_timeout_s) > 0):
             raise ValueError('carton_level.release_confirm_timeout_s must be a finite positive number of '
@@ -1129,6 +1184,15 @@ def resolve_level_config(spec):
     # sim-place-verify-rest-tolerance-v1 (nullable metres; absent => None => stall trigger unchanged)
     if spec.get('place_release_stall_height_margin_m') is not None:
         kw['place_release_stall_height_margin_m'] = float(spec['place_release_stall_height_margin_m'])
+    # sim-place-descent-stall-false-start-v1: the opt-in stall arming + its threshold keys (absent => None
+    # arming => byte-identical). The arming string is passed through as-is so validate() names a bad value.
+    if spec.get('place_release_stall_arming') is not None:
+        kw['place_release_stall_arming'] = spec['place_release_stall_arming']
+    for fnum in ('place_release_stall_lag_m', 'place_release_stall_begun_m'):
+        if spec.get(fnum) is not None:
+            kw[fnum] = float(spec[fnum])
+    if spec.get('place_release_stall_arm_grace_s') is not None:
+        kw['place_release_stall_arm_grace_s'] = float(spec['place_release_stall_arm_grace_s'])
     if 'place_support_tokens' in spec and spec['place_support_tokens'] is not None:
         _pst = spec['place_support_tokens']
         # Pass the value through (even a malformed one) so validate() rejects a string / empty / non-list
