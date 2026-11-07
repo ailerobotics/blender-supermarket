@@ -139,6 +139,43 @@ def test_descent_wiring_installs_min_clearance_closure(monkeypatch):
     assert records and records[-1]['include'] == ['post_2']
 
 
+def test_descent_wiring_include_support_sweeps_the_shelf_and_refuses_by_name(monkeypatch):
+    """sim-pad-down-descent-jam-physics-v1: with ``include_support`` the wired descent gate ALSO sweeps the
+    SUPPORT board (deck/shelf) and refuses a gripper-housing-vs-support PENETRATION by name (the pad-down jam
+    the cage-only sweep was blind to), while a cage body only refuses below the 30 mm design margin."""
+    # spy: the cage body (post_2) rides CLEAR (+0.10 m), the support board (deck) is PENETRATED (-0.05 m).
+    def _spy(waypoints, urdf, xrdf, bodies, T, *, include=None):
+        return {'post_2': 0.10, 'deck': -0.05}.copy() if 'deck' in (include or []) else {'post_2': 0.10}
+    monkeypatch.setattr(pc, 'preplace_cage_arm_clearance',
+                        lambda w, u, x, b, T, *, include=None: (_spy(w, u, x, b, T, include=include)))
+    c = _controller()
+    block = {'cart_pose': [0.0, 0.0, 0.0, 0.0], 'collider_boxes': FAKE_BOXES,
+             'xrdf': '/x/mobile.xrdf', 'margin': 0.03, 'include_support': True}
+    armed = wiring.wire_place_cage_gates(
+        c, {'place_descent_cage_gate': block}, '/x/mobile.urdf', log=lambda *a, **k: None)
+    assert armed == ['place_descent_cage_gate']
+    reject = c._place_descent_cage_gate([[0.0] * 6, [0.1] * 6])
+    # the support board is swept (include carries deck) AND the penetration is refused naming the support
+    assert reject is not None and 'prim=deck' in reject and 'SUPPORT board' in reject
+    # ...and the min-clearance closure now ranks by the support board too (the tightest body, -0.05)
+    assert c._place_descent_cage_min_clearance([[0.0] * 6, [0.1] * 6]) == pytest.approx(-0.05)
+
+
+def test_descent_wiring_without_include_support_is_cage_only_byte_identical(monkeypatch):
+    """Absent ``include_support`` (the default) the wired descent gate sweeps the CAGE only -- the support
+    board's clearance is never read, so a shelf penetration is NOT refused (byte-identical with PR 376)."""
+    def _spy(waypoints, urdf, xrdf, bodies, T, *, include=None):
+        return {n: (-0.05 if n == 'deck' else 0.10) for n in (include or [])}
+    monkeypatch.setattr(pc, 'preplace_cage_arm_clearance',
+                        lambda w, u, x, b, T, *, include=None: _spy(w, u, x, b, T, include=include))
+    c = _controller()
+    block = {'cart_pose': [0.0, 0.0, 0.0, 0.0], 'collider_boxes': FAKE_BOXES, 'margin': 0.03}
+    wiring.wire_place_cage_gates(c, {'place_descent_cage_gate': block}, '/x/mobile.urdf',
+                                 log=lambda *a, **k: None)
+    # cage-only sweep: deck never swept, post_2 clear -> no refusal (the pre-fix blind verdict)
+    assert c._place_descent_cage_gate([[0.0] * 6, [0.1] * 6]) is None
+
+
 def test_preplace_wiring_installs_hook_that_routes_through_the_sweep(monkeypatch):
     records = []
     monkeypatch.setattr(pc, 'preplace_cage_arm_clearance', _spy_sweep(records))

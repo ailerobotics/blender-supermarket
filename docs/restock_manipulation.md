@@ -622,6 +622,44 @@ Recommended ON values (coldwin94): `docs/examples/place-pad-down-arrival-fragmen
 `scripts/check_place_pad_down_arrival.py`, `scripts/twin/tests/test_place_reorient.py`,
 `scripts/twin/tests/test_place_pad_down_arrival.py`; write-up: `data/sim-place-pad-down-arrival-v1/report.md`.
 
+#### The pad-down descent strikes the SHELF, not the cage (sim-pad-down-descent-jam-physics-v1)
+
+coldwin98–100 jammed the pad-down set-down **~0.11 m above the shelf**, pressing at the gravity baseline with
+**zero** descent, while the descent-cage proof above (≥ +103 mm) said every link cleared. The model and the
+physics disagreed because the cage sweep **only swept the cage** (posts + side/back bars) and **excluded the
+support board**. A CPU FK-replay of the recorded `TRAJ_HOST_PLAN` descent against the **composed** `mission.usda`
+colliders (not the `author_cart` box model) named the real pair: the **gripper suction HOUSING**
+(`suction_cups` / `surface_plate_*` / `cube_without_surface_plates`) **strikes `/Rollwagen/chassis/shelf`** — it
+hangs **~0.14 m below the carton bottom** in the pad-down orientation, so it reaches the shelf board (−52…−59 mm
+into it from the **first** descent waypoint) while the carton is still ~0.10 m above the seat and every cage body
+stays ≥ +0.11 m clear. The welded carton is cage-**filtered** and is not the contact; the housing is.
+
+- **Model fix** (`place_clearance.place_descent_sweep_bodies` = cage + the support board;
+  `place_descent_sweep_reject` with **two margins** — cage at the 30 mm design margin, support board at a
+  **penetration-only** margin, since the pad-down housing legitimately rides close as it lowers the carton).
+  Opt-in via `include_support` on the descent providers and the `place_descent_cage_gate` HOST block
+  (`place_cage_wiring`); default off ⇒ byte-identical. With it on, the descent dispatch + the pad-down branch
+  selector **refuse a gripper-housing-vs-shelf strike by name** (`PLACE_DESCENT_CAGE_CLEARANCE prim=shelf`)
+  instead of the blind physical jam.
+- **Mis-sized body**: the `author_cart` box-model shelf (top **0.9325**, 25 mm thick) is ~31 mm **lower** and
+  thinner than the **composed** mission shelf (flat top face **0.9639**, AABB corner 0.9712, 40 mm thick) — so the
+  CPU proof substitutes the real composed shelf box (`scripts/check_pad_down_shelf_contact.py`).
+- **Re-plan limitation (honest)**: a pad-down descent that clears the shelf by the **≥ 30 mm design margin is
+  geometrically unreachable** with the current side grip — the housing hangs below the carton and must occupy
+  the shelf-edge volume when the carton is over the shelf. It **skims** the edge at **+9…+17 mm** on a clean
+  straight descent and strikes at **−52…−59 mm** on the recorded up-and-over. The penetration-only support margin
+  therefore passes a clean close-ride and refuses a strike; a robustly-clear place needs a **lane-owned grip /
+  approach change** (a top-down grip, or placing the carton at the shelf lip so the housing hangs past the edge).
+- **Instrument** (`place_contact_logger`, opt-in, boot-wired in `isaac_factory.create`): logs the real PhysX
+  contact pair during the place descent — `CONTACT_PAIR a=… b=… depth=… phase=place event=first|deepen` — so the
+  next run **names the contact from physics** and a disagreement like this can never again be argued from the
+  model alone.
+
+Recommended ON values (coldwin101): `docs/examples/pad-down-descent-jam-fragment.json`; CPU proof:
+`scripts/check_pad_down_shelf_contact.py`, `scripts/twin/tests/test_place_descent_shelf_contact.py`,
+`scripts/twin/tests/test_place_contact_logger.py`, `scripts/twin/tests/test_place_cage_wiring.py`; write-up:
+`data/sim-pad-down-descent-jam-physics-v1/report.md`.
+
 #### The seat gate is the single release authority, incl. the pad-down descent (sim-seat-gate-pad-down-path-v1)
 
 coldwin98 ran the three-stage set-down cleanly, then released the weld **in mid-air 106 mm above the seat**
