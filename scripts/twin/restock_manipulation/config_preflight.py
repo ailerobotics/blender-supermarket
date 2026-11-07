@@ -916,6 +916,94 @@ def check_place_preplace_standoff(host_cfg, runtime_cfg, *, resolved_top_z=None,
     return cart_support.place_descent_problems(resolved_top_z, clearance)
 
 
+def seat_gates_on(host_cfg):
+    """sim-seat-gate-pad-down-path-v1: the names of the merged place gates that are ON in the HOST config.
+
+    The pad-down ARRIVAL reorientation, the cage descent/preplace gates and the HONEST SEAT gate are all
+    proven ONLY for the upper-shelf FLAT TOP seat. This is the single predicate ``check_seat_gates_support``
+    and the handoff use to decide whether the shelf-flat-top placement is MANDATORY. Pure; tolerant of a
+    malformed carton_level (returns [] -- ``check_carton_level`` names it). The cage gates are top-level HOST
+    keys (not carton_level): a truthy value counts."""
+    from twin.restock_manipulation import carton_level as cl
+    names = []
+    try:
+        lc = cl.resolve_level_config((host_cfg or {}).get('carton_level'))
+    except ValueError:
+        lc = None
+    if lc is not None:
+        if getattr(lc, 'place_pad_down_arrival', False):
+            names.append('carton_level.place_pad_down_arrival')
+        if getattr(lc, 'place_seat_gate', False):
+            names.append('carton_level.place_seat_gate')
+    for key in ('place_descent_cage_gate', 'preplace_cage_gate'):
+        if (host_cfg or {}).get(key):
+            names.append('host.' + key)
+    return names
+
+
+def check_seat_gates_support(host_cfg, runtime_cfg, *, place_on_deck=False, stock_supports=None):
+    """sim-seat-gate-pad-down-path-v1: refuse, BY NAME, a launch that arms a merged place gate (pad-down
+    arrival / cage gate / honest seat gate) while the collect place targets anything other than the proven
+    upper-shelf FLAT TOP seat -- so coldwin98's deck aim is caught BEFORE a GPU boot, not discovered in a run.
+
+    The merged gates model a FIXED shelf-flat-top seat. Two launch shapes defeat that and are refused:
+
+      * ``RESTOCK_PLACE_ON_DECK`` (``place_on_deck``): this env derives the place target from the LIVE
+        support prim (the deck-interior / live-support derivation, isaac_factory ``_deck_place_target`` /
+        ``_support_top_z_world``). coldwin98 ran it with the gates on and the set-down was aimed ~23 mm below
+        the GT-resolved shelf flat top -- into the deck region the upper shelf covers -- so the pad-down
+        descent jammed under the shelf and (with the seat gate still unarmed on that dispatch path) the weld
+        released in mid-air 106 mm above the seat. The gates are proven for the FIXED shelf-flat-top constant
+        placement, NOT the live deck-interior derivation.
+      * a RUNTIME ``cart_placement.support_prim`` that resolves to the DECK (index 0 / ``'deck'`` / absent
+        default): the deck is UNPLACEABLE from above (its own upper shelf blocks the vertical descent,
+        coldwin46) and is not the shelf the gates model.
+
+    No-op ([]) when no merged gate is on (byte-identical). The message names the gate(s) and the fix (unset
+    RESTOCK_PLACE_ON_DECK, select the shelf, pin the three support-z places to the resolved shelf flat top)."""
+    from twin.restock_manipulation import cart_support, config_access
+    gates = seat_gates_on(host_cfg)
+    if not gates:
+        return []
+    problems = []
+    gate_list = ', '.join(gates)
+    if place_on_deck:
+        problems.append(
+            f"merged place gates [{gate_list}] are ON together with RESTOCK_PLACE_ON_DECK: the gates model a "
+            f"FIXED upper-shelf FLAT TOP seat, but RESTOCK_PLACE_ON_DECK derives the place target from the "
+            f"LIVE support prim (the deck-interior / live-support derivation). In coldwin98 that aimed the "
+            f"set-down ~23 mm below the GT-resolved shelf flat top -- into the deck region the upper shelf "
+            f"covers -- so the pad-down descent jammed under the shelf and the weld released in mid-air "
+            f"106 mm above the seat. Unset RESTOCK_PLACE_ON_DECK and pin the three support-z places (the GT "
+            f"place slot, the scenario cart_support_z_world and the runtime cart_placement.support_z_world) "
+            f"to the resolved shelf FLAT TOP (sim-seat-gate-pad-down-path-v1).")
+    # A support selection that resolves to the DECK (independent of the env) is also refused with the gates.
+    cp = config_access.cart_placement_block(runtime_cfg) or {}
+    selector = cp.get('support_prim') if isinstance(cp, dict) else None
+    supports = _resolve_stock_supports(stock_supports)
+    deck_selected = None
+    if supports is not None:
+        try:
+            resolved = cart_support.resolve_support_prim(supports, selector)
+        except ValueError:
+            resolved = None                              # bad selector -> check_support_selection names it
+        if resolved is not None:
+            deck_selected = (resolved == supports[0])
+    else:
+        # usd-core absent: judge by the selector shape (absent / 0 / a 'deck' name == the deck default).
+        if selector is None or selector == 0:
+            deck_selected = True
+        elif isinstance(selector, str):
+            deck_selected = selector.strip().rsplit('/', 1)[-1] == 'deck'
+    if deck_selected:
+        problems.append(
+            f"merged place gates [{gate_list}] are ON but the RUNTIME place support resolves to the "
+            f"Rollwagen DECK (cart_placement.support_prim={selector!r}). The deck is covered by the upper "
+            f"shelf (UNPLACEABLE from above, coldwin46) and the gates are proven ONLY for the upper-shelf "
+            f"FLAT TOP seat. Select the shelf (cart_placement.support_prim: 'shelf').")
+    return problems
+
+
 def check_cart_placement_source(runtime_cfg):
     """sim-preflight-nested-cart-placement-v1: refuse a STALE top-level ``cart_placement`` duplicate.
 
@@ -1036,6 +1124,11 @@ def main(argv=None):
     # here, not silently at the GPU boot (always, not just --require'd). Reads the nested block (the one
     # the factory reads) via config_access.
     problems += check_support_selection(runtime_cfg)
+    # sim-seat-gate-pad-down-path-v1: the merged pad-down / cage / honest-seat gates are proven ONLY for the
+    # upper-shelf flat-top seat; refuse a launch that combines them with RESTOCK_PLACE_ON_DECK (the live
+    # deck-interior derivation) or a deck support selection (coldwin98 aimed the set-down at the deck the
+    # shelf covers). Always on (not --require'd); no-op when no merged gate is on.
+    problems += check_seat_gates_support(host_cfg, runtime_cfg, place_on_deck=args.place_on_deck)
     # sim-place-preplace-above-support-v1: a NON-deck place support selected while the collect pre-place
     # standoff is still the deck-tuned fixed shape (no preplace_above_support) reproduces coldwin48 (the
     # from-above release fires in mid-air). With --support-top-z-world it also reports + checks the

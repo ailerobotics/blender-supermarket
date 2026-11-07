@@ -1,0 +1,30 @@
+{
+  "_comment": "sim-seat-gate-pad-down-path-v1. Purpose: make the honest SEAT gate the single release authority in EVERY place-descent path (incl. the PR 380 three-stage pad-down set-down) and stop the coldwin98 mid-air release. cw98 ran the pad-down set-down cleanly, then the release fired 106 mm ABOVE the seat and the contact release let the carton go -- although place_seat_gate was ON. NAMED cause (cw98 host-stack.log): a DISPATCH-PATH bug -- the release gate (_place_release_gate) observed during the pad-down REORIENT sub-leg (stage b), where the carton is held LEVEL at the shifted standoff and its centre z is FROZEN (0.6375). After place_release_stall_ticks frozen ticks the RAW stall trigger fired a release, and the seat (seat_center_z) was still UNARMED (it is set only in the post-reorient descent block, reached after _place_reoriented latches -- which never happened because the release pre-empted the reorient). No PLACE_SEAT_GATE_ARM / PLACE_CONTACT_RELEASE_ARM appears in the cw98 logs. The code fix is unconditional on the existing keys (no new key): the controller no longer runs the gate during the reorient leg, AND PlaceReleaseGate(require_seat=place_seat_gate) forbids any seat-blind raw release. This fragment records the CONFIG coldwin100 needs so the gates get the PROVEN upper-shelf flat-top seat, NOT the deck.",
+
+  "_carton_level_HOST_block_unchanged": "The carton_level HOST block (ros_host_config.json) keeps the SAME ON values as cw98 -- the fix needs no key flip here: place_release_on_contact:true, place_seat_gate:true, place_pad_down_arrival:true, place_from_above:true, place_seat_tol_m:0.02. require_seat is derived from place_seat_gate inside the controller (no config key).",
+
+  "_the_change_for_coldwin100_is_the_PLACEMENT_not_the_gates": "cw98's gates were correct; the TARGET was wrong. The merged pad-down / cage / seat gates are proven ONLY for the upper-shelf FLAT TOP seat. cw98 ran RESTOCK_PLACE_ON_DECK=1, which derives the place target from the LIVE support prim (deck-interior derivation) and aimed the set-down ~23 mm below the GT-resolved shelf flat top -- into the deck region the upper shelf covers. config_preflight.check_seat_gates_support now REFUSES that combination before boot.",
+
+  "env": {
+    "RESTOCK_PLACE_ON_DECK": "UNSET (remove it): the gates are proven for the FIXED shelf-flat-top constant placement, not the live deck-interior derivation. With a merged gate on, the preflight hard-refuses RESTOCK_PLACE_ON_DECK and a deck support selection.",
+    "RESTOCK_PLACE_SUPPORT_FLAT_TOP": "1 (keep): any live support-z read resolves to the shelf FLAT TOP face, not the tilt-inflated world-AABB corner (+7 mm). Also pins isaac_factory._deck_place_target z to the same flat top so the three support-z places agree.",
+    "RESTOCK_COLLECT_GROUND_TRUTH": "1 (as cw98): the collect pick is GT so the transfer/place runs."
+  },
+
+  "runtime_cart_placement": {
+    "location": "rollwagen",
+    "support_prim": "shelf",
+    "support_z_world": 0.9633,
+    "load_center_body_xy": [0.0, 0.0],
+    "free_dimensions": [0.65, 0.45, 0.3],
+    "_note": "support_prim MUST be 'shelf' (not 'deck' / absent). support_z_world is the resolved upper-shelf FLAT TOP world z (0.9633 at the composed/un-settled chassis, per sim-place-seat-geometry-v1; the DYNAMIC cart settles to ~0.9325 at set-down -- read the live settled flat top). Pin the GT place slot support_z_world AND the scenario initial_staging.cart_support_z_world to the SAME value."
+  },
+
+  "_three_support_z_places_to_pin": "All three must carry the resolved shelf FLAT TOP: (1) the runtime cart_placement.support_z_world, (2) the scenario initial_staging.cart_support_z_world / GT place_slot support_z_world, (3) the preflight --support-top-z-world. Pass --support-top-z-world <shelf flat top> (NOT the 0.9707 AABB corner cw98 passed). isaac_factory pins the live GT-slot + reposition place-target z to the same flat top when RESTOCK_PLACE_SUPPORT_FLAT_TOP=1.",
+
+  "_preflight_invocation": "Drop --place-on-deck entirely from the config_preflight call (the gates + RESTOCK_PLACE_ON_DECK combination is refused). If any pad-down/cage/seat gate is on, config_preflight.check_seat_gates_support runs automatically (no --require entry needed) and refuses a deck selection or RESTOCK_PLACE_ON_DECK.",
+
+  "_expected_on_coldwin100": "HOST_EFFECTIVE_CONFIG shows place_seat_gate + place_pad_down_arrival on. During the pad-down set-down: PLACE_REORIENT fires, then the descent block logs PLACE_SEAT_GATE_ARM (support_top = the shelf flat top, seat_center_z, seat_tol) BEFORE any PLACE_RELEASE_TICK -- i.e. the seat is armed before the gate judges a descent. The descent reaches the seat and PLACE_CONTACT_RELEASE fires with the carton bottom WITHIN seat_tol of the seat (not 106 mm above). If the descent jams above the seat, expect PLACE_OBSTRUCTED (hold -> bounded re-approach -> fail by name), never a mid-air release.",
+
+  "_byte_identical_off": "require_seat defaults off in PlaceReleaseGate; the reorient-suppression guard is inert when place_pad_down_arrival is off; check_seat_gates_support returns [] when no merged gate is on; the _deck_place_target pin is inert when RESTOCK_PLACE_SUPPORT_FLAT_TOP is off. A run with the merged gates off is byte-identical."
+}

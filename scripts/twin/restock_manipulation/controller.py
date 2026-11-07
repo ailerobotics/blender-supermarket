@@ -824,7 +824,10 @@ class TransferController:
                     else float(cl.place_release_stall_height_margin_m)),
                 # sim-place-seat-geometry-v1: the honest seat gate's tolerance; seat_center_z is armed
                 # per-set-down at the descent-arm block (reset) only when place_seat_gate is on.
-                seat_tol_m=float(getattr(cl, 'place_seat_tol_m', 0.02)))
+                seat_tol_m=float(getattr(cl, 'place_seat_tol_m', 0.02)),
+                # sim-seat-gate-pad-down-path-v1: when place_seat_gate is the authority, forbid a seat-blind
+                # raw release in ANY descent path -- a trigger with no seat armed holds (coldwin98 fix).
+                require_seat=bool(getattr(cl, 'place_seat_gate', False)))
         # sim-place-preplace-above-support-v1: which above-place lane re-targeted the collect preplace
         # standoff ('support' | 'place') and its carton-bottom clearance above the resolved support top,
         # set when _preplace_above_place_goal engages (for the engaged-standoff log).
@@ -2903,7 +2906,16 @@ class TransferController:
         # either do a bounded lateral re-approach or fail by name. Reuses the PR 334 cancel->wait-terminal->
         # detach release serialization (shared with the legacy gate below). Scoped to the collect deck place.
         _prg = self._place_release_gate
-        if (_prg is not None and self.held and self.phase == 'place' and self._collect_deck_place()):
+        # sim-seat-gate-pad-down-path-v1: do NOT run the release gate during the PR 380 pad-down REORIENT
+        # sub-leg (stage b). It observes with commanded_down=True on every place tick, but during the
+        # reorientation the carton is held LEVEL at the shifted standoff and its centre z is FROZEN -- so
+        # after place_release_stall_ticks the raw stall trigger would fire a release at the standoff height,
+        # 106 mm ABOVE the seat (coldwin98). The descent (and the seat-gate arming) only begins AFTER the
+        # reorient completes (_place_reoriented). Suppress the gate until then so it only ever judges the real
+        # descent. Non-pad-down / already-reoriented => unchanged (byte-identical).
+        _awaiting_pad_down_reorient = self._pad_down_arrival_on() and not self._place_reoriented
+        if (_prg is not None and self.held and self.phase == 'place' and self._collect_deck_place()
+                and not _awaiting_pad_down_reorient):
             _pz = (float(sensors.placed_pose[2])
                    if (sensors.placed_pose is not None and len(sensors.placed_pose) >= 3
                        and math.isfinite(float(sensors.placed_pose[2]))) else None)

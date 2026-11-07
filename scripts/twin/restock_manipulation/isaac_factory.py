@@ -690,7 +690,18 @@ class CollectTargetBridge:
                 self._deck_local = np.linalg.inv(Tc) @ wc            # rigid in the cart frame
                 self._deck_extent = (float(mx[0] - mn[0]), float(mx[1] - mn[1]))
             w = Tc @ self._deck_local
-            world = np.array([float(w[0]), float(w[1]), float(w[2]), 1.0])
+            # sim-seat-gate-pad-down-path-v1: pin the place-target Z to the SAME resolved support FLAT TOP
+            # the GT place slot (_gt_place_target) and the seat model use, not this world-AABB CORNER z
+            # (which over-reads a tilted slab by its tilt). Keeps the xy from the deck AABB centre. So the
+            # three support-z places (GT slot, this place/reposition target, the seat) agree when the shelf
+            # flat top is selected. Only under RESTOCK_PLACE_SUPPORT_FLAT_TOP; default off => the AABB-corner
+            # z => byte-identical.
+            wz = float(w[2])
+            if self._support_flat_top:
+                flat_top = self._support_top_z_world()
+                if flat_top is not None:
+                    wz = float(flat_top)
+            world = np.array([float(w[0]), float(w[1]), wz, 1.0])
         else:
             lx, ly = cp['load_center_body_xy']
             world = np.array([float(Tc[0, 3]) + math.cos(cyaw) * lx - math.sin(cyaw) * ly,
