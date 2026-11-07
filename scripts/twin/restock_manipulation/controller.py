@@ -96,6 +96,13 @@ def _float_env_bounded(var, default, lo, hi):
         return float(default)
 
 
+# sim-motion-active-guard-v1: the motion port states that are TERMINAL (not in flight) -- a re-issued goal
+# may begin only from one of these, else begin()/begin_joint_goal() raises 'motion already active'. The
+# complement of ros_adapter._PLAN_IN_FLIGHT_STATES (kept as a literal so the pure controller never imports
+# the ROS adapter).
+_REISSUE_TERMINAL_STATES = ('idle', 'succeeded', 'failed')
+
+
 class TransferController:
     def __init__(self, motion: MotionPort, profiles: dict[str, ProductProfile], *,
                  cart_location: str = 'rollwagen', max_age: float = 0.5,
@@ -831,6 +838,27 @@ class TransferController:
         # this is a safety backstop, not a primary terminator.
         self.release_cancel_timeout_s = _float_env_bounded(
             'RESTOCK_RELEASE_CANCEL_SETTLE_S', min(2.0, float(phase_timeout)), 0.1, float(phase_timeout))
+        # sim-motion-active-guard-v1: a recovery path that RE-ISSUES an arm goal (the carried-preplace drift
+        # re-capture -- sim-preplace-wrist2-hold-v1 -- and the place set-down re-approach re-descend --
+        # sim-place-release-on-contact-v1) must first bring the ACTIVE motion to a terminal state, or
+        # begin()/begin_joint_goal() raises 'motion already active' and the generic adapter-failure handler
+        # e-stops the host (coldwin73 drift re-capture, coldwin90 place re-approach). These flags drive the
+        # ONE serialization helper (_serialize_reissue); inert (never pending) on every non-re-issue path =>
+        # byte-identical. _reapproach_reissue_pending gates the driven place descent (stopped on the
+        # contact-hold channel); _recapture_reissue_pending gates the preplace action goal (cancel +
+        # wait-terminal). _reissue_stop_issued / _reissue_sim_start are the shared cancel->settle sub-state.
+        self._reapproach_reissue_pending = False
+        self._recapture_reissue_pending = False
+        self._recapture_reissue_goal = None
+        self._reissue_stop_issued = False
+        self._reissue_sim_start = None
+        # The bounded SIM-clock budget for the active motion to reach a terminal result after the channel
+        # stop, before a re-issue FAILS BY NAME (REISSUE_MOTION_STILL_ACTIVE) -- never begin into an
+        # in-flight motion. Internal (env-tunable), clamped under the per-phase timeout; NO HOST/RUNTIME
+        # config key (config_preflight unchanged). A cancel/contact-hold settles in ~1 controller tick, so
+        # this is a safety backstop, not a primary terminator.
+        self.reissue_settle_timeout_s = _float_env_bounded(
+            'RESTOCK_REISSUE_SETTLE_S', min(2.0, float(phase_timeout)), 0.1, float(phase_timeout))
         # sim-release-open-reissue-v1: the opt-in release-open RE-ISSUE gate (coldwin84 lost the one-shot
         # gripper-open on the last-value relay -> the weld never released). Built only when
         # carton_level.release_reissue is on => off => None => byte-identical. The confirm window is clamped
@@ -1135,6 +1163,90 @@ class TransferController:
         self._release_stopped_ticks = 0
         self._release_prev_q = None
         self._release_prev_q_sim = None
+        # sim-motion-active-guard-v1: fresh re-issue serialization sub-state per op (see __init__).
+        self._reapproach_reissue_pending = False
+        self._recapture_reissue_pending = False
+        self._recapture_reissue_goal = None
+        self._reissue_reset()
+
+    def _reissue_reset(self):
+        """sim-motion-active-guard-v1: clear the shared re-issue cancel->settle sub-state (ready for the next
+        re-issue). Called at op start, and when a _serialize_reissue cycle reaches a terminal verdict
+        ('ready' / 'fail')."""
+        self._reissue_stop_issued = False
+        self._reissue_sim_start = None
+
+    def _reissue_fail_reason(self, port_state, detail):
+        """sim-motion-active-guard-v1: the REISSUE_MOTION_STILL_ACTIVE fail reason -- names the handle state
+        so host-stack.log traces the stuck channel."""
+        return ('REISSUE_MOTION_STILL_ACTIVE phase=%s: %s (handle state=%s) -- not re-issuing the goal into '
+                'an in-flight motion' % (self.phase, detail, port_state))
+
+    def _serialize_reissue(self, now, driven):
+        """sim-motion-active-guard-v1: bring the ACTIVE motion to a TERMINAL (not-in-flight) state before a
+        re-issued arm goal, so begin()/begin_joint_goal() never raises 'motion already active' (coldwin73
+        drift re-capture, coldwin90 place re-approach -- both e-stopped the host). ONE helper beneath both
+        opt-in recovery paths.
+
+        ``driven`` picks the channel that actually terminates:
+          * True  -- a position-controlled descent (the place set-down): STOP it on its OWN channel via the
+                     PR 368 contact-hold (settle_in_place + a {'kind':'contact'} control so the sim
+                     trajectory_host SUCCEEDS holding the current pose -- terminal, no fault, no global
+                     /manipulation/stop, which an ExecuteTrajectory cancel would latch).
+          * False -- an action goal (the preplace cuMotion/KDL move): cancel() + bounded wait-terminal.
+
+        Returns ``(verdict, payload)``:
+          ('ready', ())        -- the port is terminal; the caller may begin() the re-issued goal now.
+          ('hold', controls)   -- still settling; the caller returns a running Result(controls) and retries.
+          ('fail', reason)     -- the motion did not terminate within reissue_settle_timeout_s sim: a named
+                                  REISSUE_MOTION_STILL_ACTIVE reason (the caller fails by name).
+        A cancel/contact-hold here fires NO global emergency stop; it is an intended, controller-driven stop
+        (the serialization), exactly like the PR 334 contact-release handshake it reuses."""
+        if not self._reissue_stop_issued:
+            port_state = getattr(self.motion, 'state', 'idle')
+            if port_state in _REISSUE_TERMINAL_STATES:
+                self._reissue_reset()
+                return 'ready', ()
+            cancel = getattr(self.motion, 'cancel', None)
+            settle = getattr(self.motion, 'settle_in_place', None)
+            if driven and callable(settle):
+                settle()                               # stop the driven descent on its OWN channel (no cancel)
+                stop_control = ({'kind': 'contact'},)  # trajectory_host holds+succeeds (terminal, no stop)
+                channel = 'contact-hold'
+            elif callable(cancel):
+                cancel()                               # action-goal cancel (no global emergency stop)
+                stop_control = ()
+                channel = 'action-cancel'
+            else:
+                self._reissue_reset()
+                return 'fail', self._reissue_fail_reason(port_state, 'the motion port is not cancellable')
+            self._reissue_stop_issued = True
+            self._reissue_sim_start = now
+            print('REISSUE_SERIALIZE phase=%s now=%.3f driven=%s: stopping the active motion (state=%s) on '
+                  'its %s channel before the re-issued goal (no global emergency stop); waiting for the '
+                  'terminal result' % (self.phase, now, driven, port_state, channel), flush=True)
+            return 'hold', stop_control
+        # The stop was issued: drain the active motion to a terminal, not-in-flight result.
+        outcome_fn = getattr(self.motion, 'cancel_outcome', None)
+        outcome = outcome_fn() if callable(outcome_fn) else 'cancelled'
+        port_state = getattr(self.motion, 'state', 'idle')
+        if outcome is None:
+            if (self._reissue_sim_start is not None
+                    and now - self._reissue_sim_start > self.reissue_settle_timeout_s):
+                reason = self._reissue_fail_reason(
+                    port_state, 'the active motion did not reach a terminal result within %.2fs sim of the '
+                    'channel stop' % self.reissue_settle_timeout_s)
+                self._reissue_reset()
+                return 'fail', reason
+            return 'hold', ()
+        if outcome == 'error':
+            reason = self._reissue_fail_reason(port_state, 'the active motion terminated with a broken result')
+            self._reissue_reset()
+            return 'fail', reason
+        print('REISSUE_SERIALIZE_SETTLED phase=%s now=%.3f outcome=%s (the active motion is terminal) -> '
+              're-issuing the goal' % (self.phase, now, outcome), flush=True)
+        self._reissue_reset()
+        return 'ready', ()
 
     def _fresh(self, stamp, now):
         return math.isfinite(stamp) and -self.render_lead <= now - stamp <= self.max_age
@@ -1214,6 +1326,12 @@ class TransferController:
                 self._place_release_gate.reset()
                 self._place_release_log_sim = None
             self._place_contact_release_z = None
+            # sim-motion-active-guard-v1: the OBSTRUCTED place descent is STILL in flight. Owe a serialized
+            # stop of that driven descent (contact-hold channel) before the preplace re-issue, so the
+            # re-descend never begins into an in-flight motion (coldwin90: 'motion already active' at
+            # phase=preplace -> host e-stop). The preplace entry block drives it via _serialize_reissue.
+            self._reapproach_reissue_pending = True
+            self._reissue_reset()
             self._transition('preplace')
             return self._result()
         return self._fail(
@@ -1361,6 +1479,14 @@ class TransferController:
             self._preplace_convergence.disarm()
             self._preplace_wristed = False
             self._preplace_recapture_logged = False   # sim-preplace-wrist2-hold-v1: fresh log per preplace
+            # sim-motion-active-guard-v1: both re-issue serializations live in preplace; clear any pending
+            # sub-state when leaving it so it can never strand across a phase boundary. (The place->preplace
+            # re-approach sets _reapproach_reissue_pending THEN transitions to preplace -- phase=='preplace'
+            # here, so the clear does not fire on that entry.) No-op when nothing is pending => byte-identical.
+            self._reapproach_reissue_pending = False
+            self._recapture_reissue_pending = False
+            self._recapture_reissue_goal = None
+            self._reissue_reset()
         self._recovery_credit_s = 0.0          # sim-robust-phase-timeout-during-recovery-v1: fresh per phase
         self._recovery_pause_logged = False
         # sim-carton-tilt-transient-debounce-v1: a phase boundary is a settled, level moment (the move
@@ -2360,6 +2486,10 @@ class TransferController:
         a :class:`ConvergenceStall` fails by name as before. Pre-conditions (phase/finite joints/enabled)
         are checked by the caller."""
         from twin.restock_manipulation.convergence_guard import DriftRecapture
+        # sim-motion-active-guard-v1: a drift re-capture re-issue is in progress -- serialize the active
+        # preplace move to a terminal state (DO NOT re-observe the guard while settling) before re-issuing.
+        if self._recapture_reissue_pending:
+            return self._recapture_reissue_step(now, sensors)
         verdict = self._preplace_convergence.observe(now, sensors.joint_positions)
         if isinstance(verdict, DriftRecapture):
             goal = self._preplace_convergence.goal
@@ -2372,9 +2502,13 @@ class TransferController:
                 'joint': verdict.joint, 'from': verdict.from_pos, 'to': verdict.to_pos,
                 'error': verdict.error, 'best_error': verdict.best_error,
                 'count': verdict.count, 'limit': verdict.limit, 'sim_time': float(now)}})
-            self.motion.begin_joint_goal(tuple(goal), sensors.joint_positions, slow=True, goal_tol=0.2)
-            self.issued = True
-            return True, self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+            # sim-motion-active-guard-v1: the preplace move is STILL in flight when DriftRecapture fires
+            # (coldwin73: re-issuing begin_joint_goal here raised 'motion already active' -> host e-stop).
+            # Bring it terminal (cancel + wait-terminal) FIRST, then begin -- a real second attempt, bounded.
+            self._recapture_reissue_pending = True
+            self._recapture_reissue_goal = tuple(goal)
+            self._reissue_reset()
+            return self._recapture_reissue_step(now, sensors)
         if verdict is not None:
             print(verdict.message, flush=True)
             self.evidence.append({'phase_convergence': {'joint': verdict.joint, 'error': verdict.error,
@@ -2383,6 +2517,24 @@ class TransferController:
                                                         'sim_time': float(now)}})
             return True, self._fail(verdict.message)
         return False, None
+
+    def _recapture_reissue_step(self, now, sensors):
+        """sim-motion-active-guard-v1: drive the serialized drift re-capture re-issue. Serialize the active
+        preplace move to a terminal state (via _serialize_reissue, action-cancel channel), then re-issue the
+        armed preplace goal from the terminal state. Returns ``(True, result)`` for _handle_preplace_
+        convergence: a running hold while settling, a named REISSUE_MOTION_STILL_ACTIVE _fail if the move
+        never terminates within the bounded sim window, else the re-issued move Result."""
+        verdict, payload = self._serialize_reissue(now, driven=False)
+        if verdict == 'hold':
+            return True, self._result(payload)
+        goal = self._recapture_reissue_goal
+        self._recapture_reissue_pending = False
+        self._recapture_reissue_goal = None
+        if verdict == 'fail':
+            return True, self._fail(payload)
+        self.motion.begin_joint_goal(tuple(goal), sensors.joint_positions, slow=True, goal_tol=0.2)
+        self.issued = True
+        return True, self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
 
     def _carton_tilt_observe(self, now, measured):
         """sim-carton-tilt-transient-debounce-v1: the DEBOUNCED carried-tilt decision for this tick.
@@ -3114,6 +3266,22 @@ class TransferController:
                 self.evidence.append(label)
             self._transition('approach')
         if self.phase in self.poses:
+            # sim-motion-active-guard-v1: a PLACE_OBSTRUCTED lateral re-approach (sim-place-release-on-
+            # contact-v1) transitioned place->preplace to re-descend, but the OBSTRUCTED place descent is
+            # still in flight. Bring it terminal on the contact-hold channel (PR 368) BEFORE the preplace
+            # re-issue (and before the target re-validation below -- the near-deck arm occludes the fixed
+            # camera while settling), so begin()/begin_joint_goal() never raises 'motion already active'
+            # (coldwin90: HOST_FAULT_ESTOP phase=preplace 'adapter failure: RuntimeError: motion already
+            # active'). A real second descent attempt, bounded, or a named REISSUE_MOTION_STILL_ACTIVE fail.
+            # Inert (pending False) on every non-re-approach preplace entry => byte-identical.
+            if self._reapproach_reissue_pending and not self.issued:
+                verdict, payload = self._serialize_reissue(now, driven=True)
+                if verdict == 'hold':
+                    return self._result(payload)
+                self._reapproach_reissue_pending = False
+                if verdict == 'fail':
+                    return self._fail(payload)
+                # 'ready': the obstructed descent is terminal -> fall through to the preplace re-issue below.
             # OBSERVE-THEN-EXECUTE lock (firstmate 2026-10-15, key approach-sensing-occlusion): once
             # observe has validated the source/target registration and cuMotion has planned the reach,
             # the moving arm occludes/degrades the FIXED source camera's view of the support it reaches
