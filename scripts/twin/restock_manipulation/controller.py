@@ -769,6 +769,7 @@ class TransferController:
         self._place_release_gate = None
         self._place_reapproach_count = 0
         self._place_release_log_sim = None     # last PLACE_RELEASE_TICK heartbeat time (throttle)
+        self._place_seat_center_z = None       # sim-place-seat-geometry-v1: armed seat (carton-centre z) per set-down
         if (self._carton_level is not None
                 and getattr(self._carton_level, 'place_release_on_contact', False)):
             from twin.restock_manipulation.place_release import PlaceReleaseGate
@@ -783,7 +784,10 @@ class TransferController:
                 obstruction_gap_mm=cl.place_obstruction_gap_mm,
                 stall_height_margin_m=(
                     None if getattr(cl, 'place_release_stall_height_margin_m', None) is None
-                    else float(cl.place_release_stall_height_margin_m)))
+                    else float(cl.place_release_stall_height_margin_m)),
+                # sim-place-seat-geometry-v1: the honest seat gate's tolerance; seat_center_z is armed
+                # per-set-down at the descent-arm block (reset) only when place_seat_gate is on.
+                seat_tol_m=float(getattr(cl, 'place_seat_tol_m', 0.02)))
         # sim-place-preplace-above-support-v1: which above-place lane re-targeted the collect preplace
         # standoff ('support' | 'place') and its carton-bottom clearance above the resolved support top,
         # set when _preplace_above_place_goal engages (for the engaged-standoff log).
@@ -2580,6 +2584,10 @@ class TransferController:
                 _res = self._place_obstructed(now, _dec)
                 if _res is not None:
                     return _res
+            elif _dec.action == 'fault':
+                # sim-place-seat-geometry-v1: the descent reached/passed the modelled seat with no measured
+                # contact -- the support is not where modelled. Fail by name rather than releasing into a fall.
+                return self._fail('PLACE_SEAT_FAULT: ' + _dec.reason)
             elif _dec.action == 'release':
                 from twin.restock_manipulation import carton_level as cl
                 print('%s phase=place now=%.3f trigger=%s carton_z=%s: the descending welded carton touched '
@@ -3416,10 +3424,47 @@ class TransferController:
                                     print('PLACE_CONTACT_RELEASE_ARM disabled: %s (legacy level-gate release '
                                           'owns the set-down)' % exc, flush=True)
                                     self._place_contact_release_z = None
+                            # sim-place-seat-geometry-v1: when the HONEST seat gate is on, OVERRIDE the PR 374
+                            # relative threshold with the ABSOLUTE corrected seat (support TOP + carton half, in
+                            # the carton-centre frame == the measured placed_pose frame). The support top is the
+                            # live cart-tracked collect place target z (self.target_surface[2], ur_base_link).
+                            # ASSERT the seat sits BELOW the descent START carton_z: a threshold at/above the
+                            # start can never be reached by the descent, so a release there fires at the standoff
+                            # (exactly PR 374's bug) -- refuse the set-down BY NAME at arm time instead. Default
+                            # off => this block is skipped => the PR 374 relative threshold stands (byte-identical).
+                            self._place_seat_center_z = None
+                            if (getattr(self._carton_level, 'place_seat_gate', False)
+                                    and s.placed_pose is not None and len(s.placed_pose) >= 3
+                                    and math.isfinite(float(s.placed_pose[2]))
+                                    and self.target_surface is not None and len(self.target_surface) >= 3
+                                    and math.isfinite(float(self.target_surface[2]))):
+                                carton_half = float(self.profile.dimensions[2]) / 2.0
+                                support_top_base = float(self.target_surface[2])
+                                seat_center_z = support_top_base + carton_half
+                                start_carton_z = float(s.placed_pose[2])
+                                if seat_center_z >= start_carton_z:
+                                    return self._fail(
+                                        'PLACE_SEAT_THRESHOLD_ABOVE_START: the modelled seat carton-centre z '
+                                        '%.4f (support top %.4f + carton half %.4f) sits at/above the descent '
+                                        'START carton_z %.4f -- the descent can never reach the seat and a '
+                                        'release there would fire at the standoff (PR 374). Refusing the '
+                                        'set-down by name (check the resolved support top vs the standoff).'
+                                        % (seat_center_z, support_top_base, carton_half, start_carton_z))
+                                self._place_seat_center_z = seat_center_z
+                                self._place_contact_release_z = seat_center_z   # absolute seat; bypasses PR 374
+                                print('PLACE_SEAT_GATE_ARM phase=place support_top=%.4f carton_half=%.4f -> '
+                                      'seat_center_z=%.4f (start_carton_z=%.4f seat_tol=%.3f): release only '
+                                      'within tol of the seat; a measured contact ABOVE is PLACE_OBSTRUCTED, a '
+                                      'descent past the seat with no contact is a named fault'
+                                      % (support_top_base, carton_half, seat_center_z, start_carton_z,
+                                         float(getattr(self._carton_level, 'place_seat_tol_m', 0.02))),
+                                      flush=True)
                             # Arm the contact-gated gate with the freshly computed z fallback (which may be
-                            # None -- the descent-independent triggers still fire).
+                            # None -- the descent-independent triggers still fire) and the honest seat (None
+                            # unless place_seat_gate armed it above => byte-identical).
                             if self._place_release_gate is not None:
-                                self._place_release_gate.reset(release_z=self._place_contact_release_z)
+                                self._place_release_gate.reset(release_z=self._place_contact_release_z,
+                                                               seat_center_z=self._place_seat_center_z)
                                 self._place_release_log_sim = None
                             if cl_peak is not None:
                                 mr, mp, _ = cl.predict_path_tilt_executed(

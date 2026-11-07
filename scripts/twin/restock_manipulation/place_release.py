@@ -31,6 +31,8 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
+from twin.restock_manipulation import place_seat_geometry as _psg
+
 #: Default substrings that identify the SELECTED support SURFACE in a hit-prim path. A hit body whose
 #: path contains one of these is the shelf/deck the carton sets down on (release-eligible); any OTHER
 #: hit body (a cage ``post_*``, drawbar, rail) is an OBSTRUCTION. Tokens, not an exact path, so the
@@ -49,8 +51,10 @@ class PlaceReleaseDecision:
     """One place-descent tick verdict.
 
     ``action`` is ``'press'`` (keep descending), ``'release'`` (fire the weld release NOW -- the support
-    was touched) or ``'obstructed'`` (a NON-support body is flush under the descending carton -- do not
-    press, do not release). ``trigger`` is the winning release trigger (``'effort'`` | ``'stall'`` |
+    was touched AT the modelled seat), ``'obstructed'`` (a NON-support body is flush under the descending
+    carton, OR -- with the seat gate on -- a measured contact occurred well ABOVE the modelled seat) or
+    ``'fault'`` (seat gate on: the descent reached/passed the modelled seat with NO contact -- the support
+    is not where modelled). ``trigger`` is the winning release trigger (``'effort'`` | ``'stall'`` |
     ``'contact'`` | ``'z'``) or None. ``reason`` is a ready-to-log sentence. The numbers are the evidence
     the controller logs (``PLACE_RELEASE_TICK`` / ``PLACE_CONTACT_RELEASE`` / ``PLACE_OBSTRUCTED``)."""
     action: str
@@ -91,7 +95,9 @@ class PlaceReleaseGate:
                  contact_gap_mm: Optional[float] = None,
                  support_tokens: Sequence[str] = DEFAULT_SUPPORT_TOKENS,
                  obstruction_gap_mm: float = 2.0, effort_warmup_ticks: int = 3,
-                 stall_height_margin_m: Optional[float] = None):
+                 stall_height_margin_m: Optional[float] = None,
+                 seat_center_z: Optional[float] = None,
+                 seat_tol_m: float = _psg.DEFAULT_SEAT_TOL_M):
         self.release_z = None if release_z is None else float(release_z)
         self.effort_margin_nm = float(effort_margin_nm)
         self.effort_consecutive = max(1, int(effort_consecutive))
@@ -115,13 +121,28 @@ class PlaceReleaseGate:
         # deterministic in both.
         self.stall_height_margin_m = (None if stall_height_margin_m is None
                                        else float(stall_height_margin_m))
+        # sim-place-seat-geometry-v1: the HONEST seat gate. ``seat_center_z`` is the carton CENTRE z at the
+        # corrected modelled seat (support TOP + carton half, in the SAME ur_base_link frame as the measured
+        # carton centre ``carton_z``). When set, a measured CONTACT (effort/stall/legacy-z) releases the weld
+        # ONLY when the carton is within ``seat_tol_m`` of the seat; a contact well ABOVE the seat is an
+        # OBSTRUCTION (the coldwin87 14 cm stall -- do not drop the carton from there) and a descent that
+        # reaches/passes the seat with NO contact is a named fault (the support is not where modelled). None
+        # (default) => the seat gate is OFF => the legacy trigger behaviour (byte-identical). The shared
+        # predicate is twin.restock_manipulation.place_seat_geometry.classify_set_down.
+        self.seat_center_z = None if seat_center_z is None else float(seat_center_z)
+        self.seat_tol_m = float(seat_tol_m)
         self.reset()
 
-    def reset(self, release_z: Optional[float] = ...) -> None:  # type: ignore[assignment]
+    def reset(self, release_z: Optional[float] = ...,  # type: ignore[assignment]
+              seat_center_z: Optional[float] = ...) -> None:  # type: ignore[assignment]
         """Clear the per-descent latches. Pass ``release_z`` to re-arm the z fallback for a new set-down
-        (the controller passes the freshly computed threshold); omit it to keep the current one."""
+        (the controller passes the freshly computed threshold); omit it to keep the current one. Pass
+        ``seat_center_z`` to re-arm the honest seat gate for the new set-down (the corrected modelled seat
+        carton-centre z); omit it to keep the current one."""
         if release_z is not ...:
             self.release_z = None if release_z is None else float(release_z)
+        if seat_center_z is not ...:
+            self.seat_center_z = None if seat_center_z is None else float(seat_center_z)
         self._ticks = 0
         self._baseline: Optional[float] = None
         self._over = 0
@@ -211,6 +232,53 @@ class PlaceReleaseGate:
                 'descending carton met NON-support body %s (gap=%s mm, stall=%d) -- not pressing/releasing'
                 % (obstruction_prim, 'n/a' if gap is None else '%.2f' % gap, self._stall),
                 z, eff, self._baseline, self._stall, obstruction_prim)
+
+        # --- sim-place-seat-geometry-v1: the HONEST seat gate (supersedes the raw trigger cascade below
+        # when armed). A measured CONTACT (effort / stall / support seal-gap) releases the weld ONLY when
+        # the carton bottom is within seat_tol_m of the corrected modelled seat. A contact well ABOVE the
+        # seat is an OBSTRUCTION -- the carton is held/blocked high (coldwin87's 14 cm stall was NOT a shelf
+        # contact; the cage-filtered carton rested on nothing and the arm jammed a side-grip link on the
+        # cage), so releasing there drops the carton; do not press/release, re-approach or fail by name. A
+        # descent that reaches/passes the seat with NO contact is a named 'fault' (the support is not where
+        # modelled). The legacy carton_z fallback still arms a release only AT the seat. Byte-identical when
+        # seat_center_z is None (the gate is not armed). ---
+        if self.seat_center_z is not None and z is not None:
+            measured_contact = bool(effort_trigger or stall_trigger or contact_trigger)
+            seat_gap = z - self.seat_center_z          # carton CENTRE minus seat CENTRE == carton bottom gap
+            cls = _psg.classify_by_gap(seat_gap, contact=measured_contact, tol_m=self.seat_tol_m)
+            winning = ('effort' if effort_trigger else 'stall' if stall_trigger
+                       else 'contact' if contact_trigger else 'z' if z_trigger else None)
+            if cls == 'obstructed':
+                return PlaceReleaseDecision(
+                    'obstructed', None,
+                    'measured contact (%s) while the carton bottom is %+.1f mm vs the modelled seat '
+                    '(> seat_tol %.0f mm) -- the carton is held/blocked ABOVE the seat, NOT a set-down; not '
+                    'pressing/releasing (would drop it)'
+                    % (winning or 'stall/effort', seat_gap * 1000.0, self.seat_tol_m * 1000.0),
+                    z, eff, self._baseline, self._stall, 'above-modelled-seat')
+            if cls == 'passed':
+                return PlaceReleaseDecision(
+                    'fault', None,
+                    'the place descent reached %+.1f mm BELOW the modelled seat with NO measured contact -- '
+                    'the support is not where modelled (would drop through / the carton is falling)'
+                    % (seat_gap * 1000.0,),
+                    z, eff, self._baseline, self._stall, None)
+            if cls == 'seated' and measured_contact:
+                return PlaceReleaseDecision(
+                    'release', winning or 'contact',
+                    'measured contact (%s) AT the modelled seat (carton bottom %+.1f mm, within seat_tol '
+                    '%.0f mm) -- true set-down, releasing the weld'
+                    % (winning or 'contact', seat_gap * 1000.0, self.seat_tol_m * 1000.0),
+                    z, eff, self._baseline, self._stall, None)
+            if z_trigger and not measured_contact and abs(seat_gap) <= self.seat_tol_m:
+                # the legacy z threshold reached the seat with no stall/effort yet: release at the seat
+                return PlaceReleaseDecision(
+                    'release', 'z',
+                    'carton z=%.4f reached the modelled seat (bottom %+.1f mm within seat_tol %.0f mm)'
+                    % (z, seat_gap * 1000.0, self.seat_tol_m * 1000.0),
+                    z, eff, self._baseline, self._stall, None)
+            return PlaceReleaseDecision('press', None, 'descending (seat gate: %+.1f mm above the seat)'
+                                        % (seat_gap * 1000.0,), z, eff, self._baseline, self._stall, None)
         if effort_trigger:
             return PlaceReleaseDecision(
                 'release', 'effort',

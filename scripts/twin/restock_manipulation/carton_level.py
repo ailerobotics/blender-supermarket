@@ -802,6 +802,25 @@ class LevelConfig:
     release_free_settle_window_ticks: int = 60     # bounded hold before refusing RELEASE_NOT_FREE (not at rest)
     release_free_lift_dz_m: float = 0.06           # pure vertical clearance lift before the lateral retreat
     release_free_follow_frac: float = 0.5          # carton rose >= this fraction of the lift => followed => refuse
+    # sim-place-seat-geometry-v1 (brief parts 2+3): the HONEST seat-gated place release. The collect set-down
+    # release must fire ONLY when a measured contact (stall/effort) is within ``place_seat_tol_m`` of the
+    # CORRECTED modelled seat (support TOP + carton half, carton-centre frame). coldwin87's "solid stall" was
+    # 14 cm ABOVE the true seat (0.9325 world): the carton is filtered against the whole rollwagen cage so it
+    # rests on NOTHING there -- the arm jams a side-grip link on the cage -- so the stall is an OBSTRUCTION,
+    # not a shelf contact. PR 374 wrongly added a half-height to calibrate the threshold TO that stall (and it
+    # then sat ABOVE the descent start -> fired at the standoff). With ``place_seat_gate`` on, the release gate
+    # (``place_release.PlaceReleaseGate``) is armed with the seat centre z + tolerance: a contact AT the seat
+    # releases; a contact well ABOVE it is ``PLACE_OBSTRUCTED`` (bounded lateral re-approach / fail by name); a
+    # descent reaching/passing the seat with NO contact is a named fault; and the release threshold is the
+    # ABSOLUTE seat (support_top + half) -- NOT PR 374's relative ``placed_pose - drop + gap + half`` -- so it
+    # can never sit above the descent start (asserted by name at arm time). The seat's support top is the live
+    # cart-tracked ``target_surface[2]`` (the collect place target z, in ur_base_link); use the opt-in
+    # factory env ``RESTOCK_PLACE_SUPPORT_FLAT_TOP=1`` to resolve it as the slab FLAT TOP FACE instead of the
+    # tilted world-AABB max-z CORNER (+7 mm). Requires ``place_release_on_contact``. Default off => byte-
+    # identical (PR 374's relative threshold + the startup-stall margin own the set-down). See
+    # ``place_seat_geometry.classify_set_down`` (the shared predicate) and docs/examples/place-seat-geometry-fragment.json.
+    place_seat_gate: bool = False
+    place_seat_tol_m: float = 0.02
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -906,6 +925,14 @@ class LevelConfig:
                 or not all(isinstance(t, str) and t for t in self.place_support_tokens)):
             raise ValueError('carton_level.place_support_tokens must be a non-empty list of non-empty '
                              'substrings identifying the support surface in a hit-prim path (e.g. shelf, deck)')
+        # sim-place-seat-geometry-v1
+        if not (math.isfinite(float(self.place_seat_tol_m)) and float(self.place_seat_tol_m) > 0):
+            raise ValueError('carton_level.place_seat_tol_m must be a finite positive number of metres '
+                             '(a measured contact counts as a true set-down only within this of the '
+                             'corrected modelled seat)')
+        if self.place_seat_gate and not self.place_release_on_contact:
+            raise ValueError('carton_level.place_seat_gate requires place_release_on_contact to be on '
+                             '(the honest seat gate arms the contact-gated place release)')
         # sim-preplace-level-gate-v1
         if not (math.isfinite(self.preplace_gate_bound_deg)
                 and 0 < self.preplace_gate_bound_deg <= self.bound_deg):
@@ -997,14 +1024,14 @@ def resolve_level_config(spec):
                  'preplace_seeded_interior', 'preplace_branch_prefer_carry_connected',
                  'preplace_descent_feasible',
                  'place_release_on_contact', 'release_cancel_handshake', 'release_reissue',
-                 'release_free_check'):
+                 'release_free_check', 'place_seat_gate'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     # sim-place-release-on-contact-v1 / sim-place-release-cancel-handshake-v1 / sim-release-open-reissue-v1
     for fnum in ('place_release_effort_margin_nm', 'place_release_stall_m', 'place_obstruction_gap_mm',
                  'place_reapproach_shift_m', 'release_cancel_stopped_vel', 'release_confirm_timeout_s',
                  'release_free_stable_eps_m', 'release_free_rest_gap_m', 'release_free_lift_dz_m',
-                 'release_free_follow_frac'):
+                 'release_free_follow_frac', 'place_seat_tol_m'):
         if spec.get(fnum) is not None:
             kw[fnum] = float(spec[fnum])
     for fint in ('place_release_effort_consecutive', 'place_release_stall_ticks', 'place_reapproach_max',

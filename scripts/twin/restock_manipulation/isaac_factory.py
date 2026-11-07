@@ -457,6 +457,16 @@ class CollectTargetBridge:
         self.cart_support_path = cart_support_path
         self._deck_local = None
         self._deck_extent = None
+        # sim-place-seat-geometry-v1 (opt-in via RESTOCK_PLACE_SUPPORT_FLAT_TOP, default off => byte-
+        # identical): resolve the collect place support TOP as the slab FLAT TOP FACE (the plane the
+        # carton bottom rests on) instead of the tilted world-AABB max-z CORNER. The AABB corner over-reads
+        # a slightly-tilted slab by its tilt (+7 mm on the composed upper shelf: 0.9712 vs the 0.9639 flat
+        # face), so the modelled seat sits that much above where the carton rests. Cached separately in
+        # cart-root-local (rigid, so Tc tracks the settling cart) to avoid disturbing the AABB _deck_local
+        # the deck-interior placement path uses.
+        import os as _os
+        self._support_flat_top = _os.environ.get('RESTOCK_PLACE_SUPPORT_FLAT_TOP', '0') != '0'
+        self._support_flat_local = None
         # sim-place-support-z-consistency-v1: log the resolved deck top ONCE per run (the collect place
         # support single source of truth), so the console proves the GT place slot was retargeted off the
         # legacy shelf constant onto the live /Rollwagen/chassis/deck top.
@@ -709,6 +719,18 @@ class CollectTargetBridge:
             return None
         cache = UsdGeom.XformCache()
         Tc = np.asarray(cache.GetLocalToWorldTransform(cart_prim)).T
+        # sim-place-seat-geometry-v1: resolve the slab FLAT TOP FACE (the plane the carton rests on), not
+        # the tilted world-AABB max-z CORNER, when RESTOCK_PLACE_SUPPORT_FLAT_TOP is on. Cached in
+        # cart-root-local (rigid) so Tc tracks the settling cart. Default off => the AABB-corner path below.
+        if self._support_flat_top:
+            if self._support_flat_local is None:
+                slab_l2w = np.asarray(cache.GetLocalToWorldTransform(deck_prim)).T
+                size = deck_prim.GetAttribute('size').Get()
+                half = 0.5 * (float(size) if size else 1.0)
+                flat_world = slab_l2w @ np.array([0.0, 0.0, half, 1.0])   # top-face CENTRE world point
+                self._support_flat_local = np.linalg.inv(Tc) @ flat_world
+            w = Tc @ self._support_flat_local
+            return float(w[2])
         if self._deck_local is None:
             bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
                                      [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])

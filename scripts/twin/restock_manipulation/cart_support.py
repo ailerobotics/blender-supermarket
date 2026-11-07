@@ -46,11 +46,39 @@ def support_top_z_world(aabb_min_z, aabb_max_z):
 
     The deck is a thin slab, so the top face is the AABB max-z. Pure/CPU -- the caller
     (``CollectTargetBridge``) computes the world AABB from the live stage and passes its
-    z bounds. Raises on a non-finite input (fail closed; never an invented height)."""
+    z bounds. Raises on a non-finite input (fail closed; never an invented height).
+
+    sim-place-seat-geometry-v1 CAVEAT: for a slightly TILTED slab the world-aligned AABB max-z is the
+    tilted box's top CORNER, which sits ABOVE the FLAT TOP FACE the carton actually rests on by the
+    tilt inflation (measured +7.3 mm on the composed upper shelf: AABB 0.9712 vs flat face 0.9639). Use
+    :func:`slab_flat_top_z_world` for the face the carton seats on; this corner is only a safe upper
+    bound. The carton rests on the FACE, not the corner, so the seat model must use the face."""
     lo, hi = float(aabb_min_z), float(aabb_max_z)
     if not (math.isfinite(lo) and math.isfinite(hi)):
         raise ValueError('support_top_z_world needs finite AABB z bounds')
     return max(lo, hi)
+
+
+def slab_flat_top_z_world(slab_l2w, half_extent_local=0.5):
+    """sim-place-seat-geometry-v1: the support SLAB's FLAT TOP FACE world z -- the plane the carton bottom
+    actually rests on -- from the slab prim's 4x4 local-to-world ``slab_l2w`` and the Cube's local
+    half-extent (``size``/2; a USD ``Cube`` has ``size=1`` => 0.5).
+
+    The slab's top-face CENTRE is the local point ``[0, 0, half_extent_local]``; its world z is
+    ``slab_l2w @ [0, 0, half_extent_local, 1]`` projected onto z. ``slab_l2w`` is in the COLUMN-VECTOR
+    convention (``M @ point``; translation in the last column) -- exactly ``CollectTargetBridge``'s
+    ``np.asarray(XformCache.GetLocalToWorldTransform(prim)).T``. Only ``M[2][2]`` (the slab local +z axis's
+    world-z component, carrying the scale AND the tilt) and ``M[2][3]`` (the slab centre world z) matter
+    because the top-face centre has zero local x/y. So for a near-level slab this is ``centre_z +
+    half_thickness``, and for a tilted slab it is the true tilted FACE centre -- NOT the world-AABB CORNER
+    :func:`support_top_z_world` returns. Pure/CPU; accepts any row-indexable 4x4 (numpy array or nested
+    list). Raises on a non-finite result (fail closed)."""
+    m = slab_l2w
+    lz = float(half_extent_local)
+    z = float(m[2][2]) * lz + float(m[2][3])
+    if not math.isfinite(z):
+        raise ValueError('slab_flat_top_z_world got a non-finite slab local-to-world transform')
+    return z
 
 
 def resolve_support_prim(stock_supports, selector=None):

@@ -1,0 +1,42 @@
+{
+  "_comment": "sim-place-seat-geometry-v1 (coldwin87 + cw83/85/86/88/89). The HONEST cart/shelf set-down release: fire ONLY at measured contact within tol of the CORRECTED modelled seat, name anything else an obstruction, and resolve the support top as the slab FLAT TOP FACE of the live cart. ON values below are for coldwin90. Default off => byte-identical with coldwin89.",
+
+  "_physical_seat_finding": "Established from the composed mission.usda (usd-core) + each run's nav-trace carton WORLD poses (scripts/check_place_seat_geometry.py, scripts/twin/restock_manipulation/place_seat_geometry.py). TRUE seat = the upper-shelf FLAT TOP of the SETTLED cart: carton BOTTOM 0.9325 world / centre 1.0225 -- PROVEN by coldwin83 (released + rested + verify PASSED, final carton centre 1.0225). The MODEL support top the runs used (COLLECT_PLACE_SUPPORT_Z 0.9707 world) is +38.2 mm too high: +7.3 mm because it resolves the TILTED shelf's world-AABB max-z CORNER instead of the flat face (0.9712 vs 0.9639 at the composed pose), and +31.4 mm because it is read at the cart's UN-SETTLED build chassis (z 0.2315) while the dynamic cart SETTLES ~3.1 cm (chassis -> ~0.20) by set-down. The carton collider half-height (0.09) and the carton CENTRE frame (sensors.placed_pose) are CORRECT. coldwin87's 'solid stall' is carton BOTTOM 1.0734 world = 14 cm ABOVE the true seat: the carton is filtered (PhysicsFilteredPairsAPI) against the WHOLE rollwagen cage, so it collides only with the deck (0.26) / shelf (0.9325) -- both far below -- and rests on NOTHING; it is held by the arm (effort peaked 1013 N*m) with a side-grip robot link jammed on the cage (robot links are NOT in the carton's cage filter; the horizontal side-grip seal raycast sees nothing). So the stall is an OBSTRUCTION, not a shelf contact. PR 374 wrongly CALIBRATED the release threshold TO that stall (it added a half-height to fire at the 0.6422 measured rest) and the threshold then sat ABOVE the descent start -> fired at the standoff.",
+
+  "_fix_1_honest_seat_gate": "carton_level.place_seat_gate (requires place_release_on_contact). The place_release.PlaceReleaseGate is armed with the corrected seat (support TOP + carton half, in the carton-centre/ur_base_link frame = the measured placed_pose frame) and place_seat_tol_m. A measured contact (effort/stall/seal) releases the weld ONLY within tol of the seat ('seated'); a contact well ABOVE the seat is PLACE_OBSTRUCTED (bounded lateral re-approach via place_reapproach_max, else fail by name) -- it never drops the carton from 14 cm; a descent that reaches/passes the seat with NO contact is a named PLACE_SEAT_FAULT. The release threshold becomes the ABSOLUTE seat (support_top + half), NOT PR 374's relative placed_pose - drop + gap + half, so it can never sit above the descent START -- and the controller ASSERTS that by name (PLACE_SEAT_THRESHOLD_ABOVE_START) at arm time. The shared predicate is place_seat_geometry.classify_set_down.",
+
+  "_fix_2_model_flat_top": "RESTOCK_PLACE_SUPPORT_FLAT_TOP=1 (env, read by the Isaac factory): resolve the collect place support TOP as the slab FLAT TOP FACE (cart_support.slab_flat_top_z_world on the shelf prim's live local-to-world) instead of the tilted world-AABB max-z CORNER. Removes the +7 mm AABB over-read; the existing Tc-tracked cart-local cache already follows the settling cart, so the place target (target_surface) / release-free bottom_gap / seat all use the flat face at the live cart pose. Default off => the AABB corner (byte-identical).",
+
+  "_pr374_undone": "place_release_stall_height_margin_m is REMOVED (back to off) and the PR 374 +half relative threshold is BYPASSED when place_seat_gate is on (the absolute seat + the arm-time assertion replace them). Keep release_free_check / release_reissue (the free-and-resting proof + clearance lift + the re-emitted open) -- they still guard the retreat once a true set-down DOES occur.",
+
+  "_env": {
+    "RESTOCK_PLACE_SUPPORT_FLAT_TOP": "1",
+    "_note": "set for BOTH the Isaac adapter process and (harmless) the host; it only gates the Isaac-side support-top resolution. Plus the coldwin89 env (RESTOCK_COLLECT_GROUND_TRUTH=1, RESTOCK_TRANSFER_MODE=live_pose, RESTOCK_TRANSFER_CARRY=wrist_guard,weld, RESTOCK_VERIFY_PLACE=1, CAGE_COLLISION filtered, the light-rig startup grace, etc.) unchanged."
+  },
+
+  "carton_level": {
+    "_existing": "Keep the coldwin89 carton_level keys (place_release_on_contact:true, place_contact_release, place_contact_gap_m:0.012, closed_loop_*, place_from_above, gravity_compensation, release_cancel_handshake:true, release_reissue:true, place_release_stall_m / place_release_stall_ticks, place_support_tokens, release_free_check:true + its tuning, ...).",
+
+    "place_seat_gate": true,
+    "_place_seat_gate_note": "THE PRIMARY FIX. Release only at measured contact within place_seat_tol_m of the corrected seat; a contact above is PLACE_OBSTRUCTED, a descent past the seat with no contact is PLACE_SEAT_FAULT. Requires place_release_on_contact. Default off => byte-identical.",
+    "place_seat_tol_m": 0.02,
+    "_place_seat_tol_m_note": "a measured contact counts as a true set-down only within 2 cm of the corrected seat -- comfortably inside the verify z-tol (0.12) and the free-check rest gap (0.03), tight enough that the 14 cm coldwin87 stall is unambiguously an obstruction.",
+
+    "place_release_stall_height_margin_m": null,
+    "_margin_note": "REMOVED (PR 373's startup-stall margin is superseded by the two-sided seat gate; leaving it on is the cw87 press trap).",
+
+    "place_reapproach_max": 2,
+    "place_reapproach_shift_m": 0.03,
+    "_reapproach_note": "a PLACE_OBSTRUCTED (carton stalled above the seat) now drives up to 2 bounded lateral re-approaches (shift base_x +-0.03 m, re-descend via the pre-place standoff) before failing by name -- a chance to clear a side-grip-vs-cage jam. If the set-down geometry truly cannot bring the carton to the seat (the robot-link jam is inherent), it fails by name (no bad drop) and the DESCENT-geometry fix is the follow-up lane -- out of scope here."
+  },
+
+  "_expected_outcomes_replayed": {
+    "coldwin83": "SEATED -- rested at the seat (the corrected seat is right).",
+    "coldwin87": "OBSTRUCTED at ~14 cm above the seat -> re-approach / fail by name (NOT the press-to-STATION_FULL_BRAKE/PATH_TOLERANCE of PR 373).",
+    "coldwin89": "OBSTRUCTED at ~12 cm above the seat -> no release at the standoff (NOT PR 374's threshold-above-start).",
+    "coldwin85_86_88": "would be OBSTRUCTED at their high release -> no release, no fall off the shelf (NOT the retreat sweep-off).",
+    "_tool": "scripts/check_place_seat_geometry.py <run dirs> reproduces these end-state classifications; tests in scripts/twin/tests/test_place_seat_geometry.py assert them."
+  },
+
+  "_bounded_gpu_proof": "Re-run the coldwin89 config (the full cold restock cycle through the collect cart set-down + release + retreat + verify) through scripts/run_mobile_restock.py under /tmp/aile-gpu.lock (HEAVY_MB=2500 for the always-on whispr), with RESTOCK_PLACE_SUPPORT_FLAT_TOP=1, place_seat_gate:true + place_seat_tol_m:0.02 + place_reapproach_max:2 merged into the HOST carton_level block and place_release_stall_height_margin_m REMOVED. Watch: PLACE_SEAT_GATE_ARM prints the corrected seat_center_z below the descent start; the welded carton descends level; IF a lateral re-approach brings the carton to within 2 cm of the seat, the release fires at the TRUE set-down and RELEASE_FREE_* confirms a free, resting, level (<=2.0 deg) carton -> verify PASSES; IF the side-grip-vs-cage jam persists, PLACE_OBSTRUCTED re-approaches then fails BY NAME (no 14 cm drop, no press to STATION_FULL_BRAKE). A PLACE_SEAT_THRESHOLD_ABOVE_START or PLACE_SEAT_FAULT would name a model/geometry regression. The complete-run video needs the carton to actually reach the seat; if the jam is inherent to the side-grip geometry, that descent-reach fix is the follow-up lane (out of scope: the pick, pre-place, tow, transfer)."
+}
