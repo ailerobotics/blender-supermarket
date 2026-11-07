@@ -906,6 +906,74 @@ def plan_start_state(scenario, start_at, stages=None, config=None):
                       carton_target=carton_target, note=note)
 
 
+#: sim-verify-staging-dock-jitter-v1 (coldwin95/96): bounded retry budget for the staged couple_cart
+#: attach. A just-spawned coupled cart's casters carry a ~0.05 m/s TGS INSTANTANEOUS-velocity jitter
+#: (the cart is at rest by net displacement; see restock/settle_metrics.py and the dock stationarity
+#: note) that trips the one-shot ``mobile.attach`` 0.02 dock-MOVING gate even though the robot is settled.
+#: The REAL couple stage passes because its retry loop catches a sub-0.02 dip; the staged attach was a
+#: single shot and failed (coldwin95: cart_speed 0.0526 > 0.02). We mirror the couple stage: step the sim
+#: a bounded number of times and re-try while the ONLY reject reason is ``moving`` (jitter), catching a
+#: dip. A ``distant`` / ``misaligned`` / ``stale`` reason is a real seating error and raises immediately
+#: (retrying cannot fix it). ~60 steps ~= 1.0 sim-s at 1/60 -- ample for the caster jitter to oscillate
+#: below 0.02 at least once. Config override: ``config['staged_attach_retry_max']``. (c) displacement-
+#: based rest is the deeper hardening pass (kept as a note).
+_STAGED_ATTACH_RETRY_MAX = 60
+
+
+def _staged_attach_retry_max(config):
+    """``config['staged_attach_retry_max']`` (a non-negative int; default 60), the bounded sim-step budget
+    for the staged couple_cart attach jitter retry. 0 => a single one-shot attempt (legacy)."""
+    try:
+        value = (config or {}).get('staged_attach_retry_max', _STAGED_ATTACH_RETRY_MAX)
+    except AttributeError:
+        value = _STAGED_ATTACH_RETRY_MAX
+    value = int(value)
+    if value < 0:
+        raise ValueError('staged_attach_retry_max must be a non-negative integer')
+    return value
+
+
+def _attach_with_jitter_retry(assembly, dock, observe, held_step, config, *, log=print):
+    """Author the synthetic hitch via ``mobile.attach``, retrying over a bounded few sim steps to catch a
+    sub-0.02 CART caster/TGS jitter dip (sim-verify-staging-dock-jitter-v1). ``observe() -> dock`` re-reads
+    the live dock measurement; ``held_step()`` advances the sim one tick with the arm held. Retries ONLY
+    while the sole dock-reject reason is ``moving`` (jitter); a ``distant`` / ``misaligned`` / ``stale``
+    reason raises immediately (unfixable by waiting). Logs every cart-speed sample it saw. Returns
+    ``(coupling_state, samples)``; raises the last ``mobile.attach`` error (with the samples) when the
+    budget is exhausted without a dip."""
+    retry_max = _staged_attach_retry_max(config)
+    coupler = getattr(getattr(assembly, 'mobile', None), 'coupler', None)
+    samples = []
+    last_err = None
+    for attempt in range(retry_max + 1):            # retry_max retries after the first attempt
+        samples.append(round(float(dock.cart_speed), 4))
+        # Classify the rejection so a real seating error (distant/misaligned/stale) fails fast; only a
+        # pure caster-jitter ``moving`` rejection is worth another sim step.
+        reasons = coupler.dock_reject_reasons(dock) if coupler is not None else []
+        cats = {cat for cat, _ in reasons}
+        if reasons and cats != {'moving'}:
+            log('STAGED_ATTACH reject is not jitter (reasons=%s) -- failing fast, no retry '
+                '(cart_speed=%.4f)' % (sorted(cats), dock.cart_speed), flush=True)
+            assembly.mobile.attach(dock)            # re-raise the authentic named error
+        try:
+            coupling = assembly.mobile.attach(dock)
+            log('STAGED_ATTACH ok attempt=%d/%d cart_speed=%.4f samples=%s'
+                % (attempt + 1, retry_max + 1, dock.cart_speed, samples), flush=True)
+            return coupling, samples
+        except ValueError as exc:                   # a 'moving' jitter rejection -- step and retry
+            last_err = exc
+            if attempt >= retry_max:
+                break
+            held_step()
+            dock = observe()
+    log('STAGED_ATTACH exhausted after %d attempts; cart_speed samples=%s min=%.4f max=%.4f'
+        % (retry_max + 1, samples, min(samples), max(samples)), flush=True)
+    raise ValueError('staged dock attach failed after %d sim-step retries -- the cart caster jitter never '
+                     'dipped to the 0.02 m/s dock gate (min cart_speed=%.4f over samples=%s); the deeper '
+                     'fix is displacement-based rest. Underlying: %s'
+                     % (retry_max + 1, min(samples), samples, last_err))
+
+
 def apply_start_state(assembly, config, scenario, *, settle_steps=None, _rigid_prim=None):
     """Establish the planned start state in the live stage. Isaac-only for the stepping; the settle +
     rest/heading verify logic is pure (``start_settle``) and CPU-tested.
@@ -1011,7 +1079,12 @@ def apply_start_state(assembly, config, scenario, *, settle_steps=None, _rigid_p
         pre = assembly.mobile.coupling_state(dock)
         if pre['joint_present']:
             raise RuntimeError('shortcut: stage already coupled before the synthetic hitch request')
-        coupling = assembly.mobile.attach(dock)
+        # sim-verify-staging-dock-jitter-v1: the just-spawned coupled cart's casters jitter a few cm/s
+        # (TGS instantaneous bias) even at rest, tripping the one-shot attach 0.02 dock-moving gate
+        # (coldwin95). Retry over a bounded few sim steps to catch a sub-0.02 dip, as the real couple
+        # stage does; a non-jitter (distant/misaligned) reject still fails fast.
+        coupling, _dock_speed_samples = _attach_with_jitter_retry(
+            assembly, dock, lambda: _dock_observation(assembly), _held_step, config)
         if not coupling.get('healthy'):
             raise RuntimeError('shortcut: synthetic cart coupling is not healthy '
                                f"(residual {coupling.get('hitch_error_m')} m); check the variant "

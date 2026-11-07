@@ -349,3 +349,111 @@ class StageIsolationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# --------------------------------------------------------------------------- sim-verify-staging-dock-jitter-v1
+from twin.restock.shortcut import _attach_with_jitter_retry, _staged_attach_retry_max
+
+
+class _JitterDock:
+    def __init__(self, cart_speed):
+        self.cart_speed = float(cart_speed)
+
+
+class _JitterCoupler:
+    """Stub gate: a cart_speed above 0.02 is a pure 'moving' (jitter) reject; `extra_cats` injects a
+    non-jitter reason (distant/misaligned) to prove the fast-fail path."""
+    def __init__(self, extra_cats=()):
+        self.extra_cats = tuple(extra_cats)
+
+    def dock_reject_reasons(self, dock):
+        out = []
+        if dock.cart_speed > 0.02:
+            out.append(('moving', f'cart_speed={dock.cart_speed:.4f} > 0.0200'))
+        for cat in self.extra_cats:
+            out.append((cat, 'injected'))
+        return out
+
+
+class _JitterMobile:
+    def __init__(self, extra_cats=()):
+        self.coupler = _JitterCoupler(extra_cats)
+        self.attach_calls = 0
+
+    def attach(self, dock):
+        self.attach_calls += 1
+        reasons = self.coupler.dock_reject_reasons(dock)
+        if reasons:
+            raise ValueError('dock rejected: stale, moving, distant, or misaligned -- '
+                             + '; '.join(f'{c}: {d}' for c, d in reasons))
+        return {'healthy': True, 'hitch_error_m': 0.0}
+
+
+class _JitterAssembly:
+    def __init__(self, extra_cats=()):
+        self.mobile = _JitterMobile(extra_cats)
+
+
+class StagedAttachJitterRetryTests(unittest.TestCase):
+    def _run(self, speeds, *, config=None, extra_cats=()):
+        asm = _JitterAssembly(extra_cats)
+        seq = list(speeds)
+        state = {'i': 0, 'steps': 0, 'logs': []}
+
+        def observe():
+            state['i'] += 1
+            return _JitterDock(seq[min(state['i'], len(seq) - 1)])
+
+        def held_step():
+            state['steps'] += 1
+
+        def log(*a, **k):
+            state['logs'].append(a[0] if a else '')
+
+        dock0 = _JitterDock(seq[0])
+        coupling, samples = _attach_with_jitter_retry(asm, dock0, observe, held_step, config, log=log)
+        return asm, coupling, samples, state
+
+    def test_first_attempt_rest_succeeds_no_step(self):
+        asm, coupling, samples, state = self._run([0.0])
+        self.assertTrue(coupling['healthy'])
+        self.assertEqual(samples, [0.0])
+        self.assertEqual(state['steps'], 0)          # no retry needed
+        self.assertEqual(asm.mobile.attach_calls, 1)
+
+    def test_retry_catches_sub_tolerance_dip(self):
+        # jitter above 0.02, dips to 0.015 on the 3rd sample -> succeed there, every sample logged
+        asm, coupling, samples, state = self._run([0.0526, 0.041, 0.015, 0.0])
+        self.assertTrue(coupling['healthy'])
+        self.assertEqual(samples, [0.0526, 0.041, 0.015])
+        self.assertEqual(state['steps'], 2)          # two sim steps before the dip
+        self.assertEqual(asm.mobile.attach_calls, 3)
+
+    def test_persistent_jitter_exhausts_and_names_samples(self):
+        with self.assertRaises(ValueError) as ei:
+            self._run([0.05] * 10, config={'staged_attach_retry_max': 3})
+        msg = str(ei.exception)
+        self.assertIn('never dipped', msg)
+        self.assertIn('min cart_speed=0.0500', msg)
+        self.assertIn('4 sim-step', msg)             # retry_max 3 => 4 attempts
+
+    def test_misaligned_reject_fails_fast_without_retry(self):
+        with self.assertRaises(ValueError) as ei:
+            self._run([0.05], extra_cats=('distant',))
+        self.assertIn('dock rejected', str(ei.exception))
+        # one classify + one authentic re-raise attach, no sim steps (not a pure jitter reject)
+
+    def test_retry_max_zero_is_single_shot(self):
+        self.assertEqual(_staged_attach_retry_max({'staged_attach_retry_max': 0}), 0)
+        with self.assertRaises(ValueError):
+            self._run([0.05], config={'staged_attach_retry_max': 0})
+
+    def test_default_and_bad_retry_max(self):
+        self.assertEqual(_staged_attach_retry_max({}), 60)
+        self.assertEqual(_staged_attach_retry_max(None), 60)
+        with self.assertRaises(ValueError):
+            _staged_attach_retry_max({'staged_attach_retry_max': -1})
+
+
+if __name__ == '__main__':
+    unittest.main()
