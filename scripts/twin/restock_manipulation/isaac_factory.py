@@ -1444,16 +1444,19 @@ def create(*, app, assembly, plan, config, output, _builder=None):
     build = _builder or _build_runtime
     runtime = build(app=app, assembly=assembly, params=params, output=output)
 
-    # sim-pad-down-descent-jam-physics-v1: opt-in PhysX contact-pair logger for the place descent. When the
+    # sim-place-contact-logger-view-safe-v1: opt-in PhysX contact-pair logger for the place descent. When the
     # 'place_contact_logger' config block is present it logs the REAL arm/gripper/carton-vs-cart contact
     # (CONTACT_PAIR a=.. b=.. depth=..) from the omni.physx contact-report callback, so a model-vs-physics
     # disagreement like the coldwin100 gripper-housing-vs-shelf jam can never again be argued from the model
-    # alone. Byte-identical off (nothing constructed/subscribed); a logger failure must never break the run.
+    # alone. VIEW-SAFE: physics_setup.assemble AUTHORED the contact-report API pre-reset (before the
+    # tensor-backed view existed) and stashed the logger on the assembly; this call only SUBSCRIBES the
+    # callback (re-authors no prim, so it cannot invalidate the view -- the coldwin101 crash). Byte-identical
+    # off (no logger pre-authored => None); a logger failure must never break the run.
     try:
         from twin.restock_manipulation.place_contact_logger import wire_place_contact_logger
         runtime._place_contact_logger = wire_place_contact_logger(assembly, config)
     except Exception as exc:                                       # pragma: no cover - needs a live Isaac
-        print('PLACE_CONTACT_LOGGER skipped (%s)' % exc, flush=True)
+        print('PLACE_CONTACT_LOGGER subscribe skipped (%s)' % exc, flush=True)
 
     def prepare_station(operation, job):
         station = ACTION_STATION.get(operation)

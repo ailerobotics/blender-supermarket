@@ -494,6 +494,7 @@ class PhysicsAssembly:
     transport: object
     paths: dict
     evidence: dict
+    place_contact_logger: object = None   # pre-reset-authored PlaceContactLogger (view-safe), or None
 
     def hold(self):
         self.mobile.park()
@@ -831,6 +832,19 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
               % (caster_suspension['spring_n_per_m'],caster_suspension['damping_n_s_per_m'],
                  caster_suspension['preload_n'],caster_suspension['target_position_m'],
                  len(caster_suspension['joints'])),flush=True)
+    # sim-place-contact-logger-view-safe-v1: opt-in PhysX contact-pair logger for the place descent. Its
+    # PhysxContactReportAPI authoring MUST happen HERE -- before world.scene.add()/world.reset() create the
+    # tensor-backed simulation view over these same prims. coldwin101 crashed because the logger's attach ran
+    # AFTER reset (in isaac_factory.create), re-authoring prims the view covered -> the view was invalidated
+    # and every arm DOF/transform read failed. Authoring pre-reset is view-safe; isaac_factory.create only
+    # SUBSCRIBES the callback (re-authors no prim) post-reset. Byte-identical off (block absent => None,
+    # nothing authored/imported). A logger failure must never break the boot.
+    place_contact_logger=None
+    try:
+        from ..restock_manipulation.place_contact_logger import wire_place_contact_logger_pre_reset
+        place_contact_logger=wire_place_contact_logger_pre_reset(stage,config)
+    except Exception as exc:                                        # pragma: no cover - needs a live Isaac
+        print('PLACE_CONTACT_LOGGER pre-reset authoring skipped (%s)'%exc,flush=True)
     robot=world.scene.add(SingleArticulation(prim_path=paths['articulation'],name='restock_robot'))
     robot_body=world.scene.add(SingleRigidPrim(prim_path=paths['base_link'],name='restock_base'))
     cart_body=world.scene.add(SingleRigidPrim(prim_path=cart_path,name='restock_cart'))
@@ -1071,4 +1085,5 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
         initialization='declared initial joint state before mission; never runtime teleport',
         physics_verified=False,camera_mapper_ready=False)
     (output/'assembly.json').write_text(json.dumps(evidence,indent=2)+'\n')
-    return PhysicsAssembly(world,stage,robot,robot_body,cart_body,controller,contact,gate,transport,paths,evidence)
+    return PhysicsAssembly(world,stage,robot,robot_body,cart_body,controller,contact,gate,transport,paths,
+                           evidence,place_contact_logger=place_contact_logger)

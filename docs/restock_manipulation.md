@@ -650,10 +650,14 @@ stays ≥ +0.11 m clear. The welded carton is cage-**filtered** and is not the c
   straight descent and strikes at **−52…−59 mm** on the recorded up-and-over. The penetration-only support margin
   therefore passes a clean close-ride and refuses a strike; a robustly-clear place needs a **lane-owned grip /
   approach change** (a top-down grip, or placing the carton at the shelf lip so the housing hangs past the edge).
-- **Instrument** (`place_contact_logger`, opt-in, boot-wired in `isaac_factory.create`): logs the real PhysX
-  contact pair during the place descent — `CONTACT_PAIR a=… b=… depth=… phase=place event=first|deepen` — so the
-  next run **names the contact from physics** and a disagreement like this can never again be argued from the
-  model alone.
+- **Instrument** (`place_contact_logger`, opt-in): logs the real PhysX contact pair during the place
+  descent — `CONTACT_PAIR a=… b=… depth=… phase=place event=first|deepen` — so the next run **names the
+  contact from physics** and a disagreement like this can never again be argued from the model alone. The
+  boot wiring is **view-safe** (sim-place-contact-logger-view-safe-v1): the `PhysxContactReportAPI` is
+  **authored before `world.reset()`** (in `physics_setup.assemble`, before the tensor-backed simulation
+  view is created — the armed line names `phase=pre-reset bodies=N`) and only the callback is **subscribed
+  after reset** (in `isaac_factory.create`, which re-authors no prim). Authoring after the view exists is
+  what crashed coldwin101 — it invalidated the view and every arm DOF/transform read failed.
 
 Recommended ON values (coldwin101): `docs/examples/pad-down-descent-jam-fragment.json`; CPU proof:
 `scripts/check_pad_down_shelf_contact.py`, `scripts/twin/tests/test_place_descent_shelf_contact.py`,
