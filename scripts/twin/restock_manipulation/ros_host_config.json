@@ -1484,7 +1484,13 @@
     "release_free_lift_dz_m": 0.06,
     "release_free_follow_frac": 0.5,
     "place_seat_gate": true,
-    "place_seat_tol_m": 0.02
+    "place_seat_tol_m": 0.02,
+    "place_pad_down_arrival": true,
+    "pad_down_arrival_shift_m": 0.20,
+    "pad_down_arrival_height_m": 0.10,
+    "pad_down_reorient_waypoints": 12,
+    "pad_down_reorient_speed": 0.04,
+    "pad_down_reorient_accel": 0.08
   },
   "preplace_convergence_stall_s": 30.0,
   "preplace_drift_recapture_rad": 0.05,
