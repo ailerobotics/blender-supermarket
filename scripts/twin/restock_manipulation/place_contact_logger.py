@@ -59,13 +59,26 @@ def classify_contact(paths: Iterable[str], *, arm_prefixes=DEFAULT_ARM_PREFIXES,
     RELEVANT contact has exactly one CART side (``/Rollwagen/...``) and at least one ROBOT/GRIPPER
     (``/MobileRobot/...``) or CARTON (``/RestockScenario/HandlingUnit``) side -- the place-descent contact.
     ``kind`` is ``'carton'`` when the non-cart side is the handling unit, ``'gripper'`` when it is a known
-    gripper-housing link, else ``'arm'``. Returns ``None`` for any contact not between the robot/carton and
-    the cart (so a cart-vs-floor or arm-vs-arm contact is ignored). Pure/CPU."""
+    gripper-housing link, else ``'arm'``. A contact with NO cart side but a CARTON side and a ROBOT side is
+    also relevant (sim-place-release-residual-bind-v1): ``'carton-gripper'`` when the robot side is a gripper
+    housing link (the residual-bind panel contact), else ``'carton-arm'``. Returns ``None`` for any other
+    contact (cart-vs-floor, arm-vs-arm, carton-vs-floor). Pure/CPU."""
     paths = [str(p) for p in paths if p]
     cart = [p for p in paths if _starts_any(p, cart_prefixes)]
     carton = [p for p in paths if _starts_any(p, carton_prefixes)]
     arm = [p for p in paths if _starts_any(p, arm_prefixes) and p not in carton]
     if not cart:
+        # sim-place-release-residual-bind-v1: a carton-vs-gripper/arm contact has NO cart side and is
+        # INVISIBLE to the cart-only filter above -- yet it is exactly the coldwin106 residual bind (a
+        # still-live gripper panel collider coincident with the carton face lifts it on the clearance
+        # lift). Log it so the next run surfaces the panel contact the model was blind to.
+        if carton and arm:
+            g = arm[0]
+            # match a gripper-housing link name ANYWHERE in the path (contact headers report the collider
+            # prim, e.g. .../surface_plate_3/collisions/mesh_0, so the last component is not the link name).
+            kind = ('carton-gripper' if any(('/' + link) in g for link in GRIPPER_HOUSING_LINKS)
+                    else 'carton-arm')
+            return (carton[0], g, kind)
         return None
     if carton:
         return (carton[0], cart[0], 'carton')

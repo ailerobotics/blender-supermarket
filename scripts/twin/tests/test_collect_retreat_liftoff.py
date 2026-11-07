@@ -259,3 +259,30 @@ def _gravity_torques(robot, q):
                 t += float(np.dot(axis, np.cross(com[name] - pj, mass[name] * g)))
         tau[jn] = t
     return tau
+
+
+# ---- carton-vs-gripper (sim-place-release-residual-bind-v1) ----
+def test_classify_carton_vs_gripper_panel_no_cart():
+    from twin.restock_manipulation.place_contact_logger import classify_contact
+    r = classify_contact(['/RestockScenario/HandlingUnit',
+                          '/MobileRobot/robot/surface_plate_3/collisions/mesh_0'])
+    assert r == ('/RestockScenario/HandlingUnit',
+                 '/MobileRobot/robot/surface_plate_3/collisions/mesh_0', 'carton-gripper')
+
+
+def test_classify_carton_vs_arm_link_no_cart():
+    from twin.restock_manipulation.place_contact_logger import classify_contact
+    r = classify_contact(['/RestockScenario/HandlingUnit', '/MobileRobot/robot/ur_forearm'])
+    assert r == ('/RestockScenario/HandlingUnit', '/MobileRobot/robot/ur_forearm', 'carton-arm')
+
+
+def test_classify_carton_vs_cart_still_wins_over_gripper():
+    # a contact that has a cart side keeps the original carton-vs-cart classification
+    from twin.restock_manipulation.place_contact_logger import classify_contact
+    r = classify_contact(['/RestockScenario/HandlingUnit', '/Rollwagen/chassis/shelf'])
+    assert r == ('/RestockScenario/HandlingUnit', '/Rollwagen/chassis/shelf', 'carton')
+
+
+def test_classify_carton_vs_floor_still_none():
+    from twin.restock_manipulation.place_contact_logger import classify_contact
+    assert classify_contact(['/RestockScenario/HandlingUnit', '/Backroom_floor']) is None
