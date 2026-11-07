@@ -14,10 +14,15 @@ directly from the ``omni.physx`` contact-report callback (the SAME API the cart 
 instead of leaving it to a model argument.
 
 Opt-in + byte-identical off: nothing constructs or attaches a logger unless the ``place_contact_logger``
-HOST/runtime block is present (:func:`wire_place_contact_logger`, called from ``isaac_factory.create``).
-The PURE core (path classification + the per-pair first/deepen log decision + the line format) needs no
-Isaac and is CPU-tested; only :meth:`PlaceContactLogger.attach` touches ``omni.physx`` / ``pxr`` (lazily,
-with injectable hooks so the boot-path wiring is testable without a GPU).
+HOST/runtime block is present. The boot wiring is VIEW-SAFE (sim-place-contact-logger-view-safe-v1): the
+PhysxContactReportAPI is authored BEFORE ``world.reset()`` creates the tensor-backed simulation view
+(:func:`wire_place_contact_logger_pre_reset`, called from ``physics_setup.assemble``), and only the
+callback is subscribed AFTER reset (:func:`wire_place_contact_logger`, called from ``isaac_factory.create``)
+-- so no prim the view covers is ever re-authored after the view exists. Re-authoring such a prim post-reset
+was the coldwin101 crash (the view was invalidated and every arm DOF/transform read failed). The PURE core
+(path classification + the per-pair first/deepen log decision + the line format) needs no Isaac and is
+CPU-tested; only :meth:`PlaceContactLogger.author_contact_reports` / :meth:`subscribe` touch ``omni.physx``
+/ ``pxr`` (lazily, with injectable hooks so the boot-path wiring is testable without a GPU).
 """
 from __future__ import annotations
 
@@ -96,6 +101,8 @@ class PlaceContactLogger:
     phase: str = 'place'
     _seen: Dict[Tuple[str, str], float] = field(default_factory=dict)
     _subscription: object = None
+    _armed_bodies: int = 0          # rigid bodies the contact-report API was authored onto
+    _attach_phase: str = ''         # WHEN the authoring ran: 'pre-reset' on the view-safe boot path
 
     def set_phase(self, phase: str) -> None:
         self.phase = str(phase)
@@ -131,24 +138,33 @@ class PlaceContactLogger:
         a, b, kind = hit
         return self.on_contact(a, b, separation_m, kind=kind)
 
-    # ----------------------------------------------------------------- Isaac attach (lazy; injectable hooks)
-    def attach(self, stage, sim_interface, *, apply_contact_report=None, decode_path=None,
-               threshold_m: float = 0.0):
+    # ------------------------------------------------- Isaac attach (lazy; injectable hooks; VIEW-SAFE split)
+    # coldwin101 crashed because the ORIGINAL single :meth:`attach` applied the PhysxContactReportAPI to the
+    # 46 rigid bodies AFTER ``world.reset()`` had built the tensor-backed simulation view over the SAME prims
+    # -- re-authoring a prim the view covers invalidates the view, so every arm DOF/transform read failed
+    # from the first mission step. The fix splits the two responsibilities: :meth:`author_contact_reports`
+    # (PURE USD authoring, MUST run BEFORE the view is created, i.e. before ``world.reset()``) and
+    # :meth:`subscribe` (registering a Python callback on the omni.physx simulation interface, which
+    # re-authors NO prim, so it is view-safe to call AFTER reset -- the same subscribe timing PR 383 used).
+    def author_contact_reports(self, stage, *, apply_contact_report=None, is_rigid_body=None,
+                               threshold_m: float = 0.0, phase: str = 'pre-reset') -> int:
         """Apply a PhysX contact-report API to every rigid body under the robot/carton/cart prefixes on
-        ``stage`` and subscribe this logger's callback to ``sim_interface`` (``omni.physx``'s
-        ``get_physx_simulation_interface()``). Returns the number of bodies instrumented.
+        ``stage``. PURE USD authoring -- it touches no tensor-backed simulation view, so it MUST be called
+        BEFORE ``world.reset()`` (and before any ArticulationView / RigidPrimView initialisation) so that no
+        prim the view covers is re-authored after the view exists. Returns the number of bodies instrumented
+        and records it (``_armed_bodies``) with the attach ``phase`` (``_attach_phase``) for the armed line.
 
-        ``apply_contact_report(prim, threshold_m)`` and ``decode_path(int)`` default to the real
-        ``PhysxSchema.PhysxContactReportAPI``/``PhysicsSchemaTools`` calls, but are INJECTABLE so the
-        boot-path wiring is testable without Isaac. Idempotent-safe to call once at boot."""
-        from pxr import UsdPhysics                                   # pxr only; usd-core has it
-        if apply_contact_report is None:
-            from pxr import PhysxSchema
-            def apply_contact_report(prim, thr):
-                PhysxSchema.PhysxContactReportAPI.Apply(prim).CreateThresholdAttr(float(thr))
-        if decode_path is None:
-            from pxr import PhysicsSchemaTools
-            decode_path = lambda i: str(PhysicsSchemaTools.intToSdfPath(i))
+        ``apply_contact_report(prim, threshold_m)`` and ``is_rigid_body(prim)`` default to the real
+        ``PhysxSchema.PhysxContactReportAPI`` / ``UsdPhysics.RigidBodyAPI`` calls but are INJECTABLE so the
+        boot-path wiring (including the view-ordering test) is testable with NO pxr/Isaac. Idempotent-safe."""
+        if apply_contact_report is None or is_rigid_body is None:
+            from pxr import UsdPhysics                               # pxr only; usd-core has it
+            if apply_contact_report is None:
+                from pxr import PhysxSchema
+                def apply_contact_report(prim, thr):
+                    PhysxSchema.PhysxContactReportAPI.Apply(prim).CreateThresholdAttr(float(thr))
+            if is_rigid_body is None:
+                is_rigid_body = lambda prim: prim.HasAPI(UsdPhysics.RigidBodyAPI)
 
         prefixes = tuple(self.arm_prefixes) + tuple(self.carton_prefixes) + tuple(self.cart_prefixes)
         n = 0
@@ -156,14 +172,31 @@ class PlaceContactLogger:
             path = str(prim.GetPath())
             if not _starts_any(path, prefixes):
                 continue
-            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            if is_rigid_body(prim):
                 apply_contact_report(prim, threshold_m)
                 n += 1
+        self._armed_bodies = n
+        self._attach_phase = str(phase)
+        return n
+
+    def subscribe(self, sim_interface, *, decode_path=None):
+        """Subscribe this logger's callback to ``sim_interface`` (``omni.physx``'s
+        ``get_physx_simulation_interface()``). Registers a Python callback only -- it re-authors NO prim, so
+        it is VIEW-SAFE to call AFTER ``world.reset()``. Returns the subscription token.
+
+        ``decode_path(int)`` defaults to the real ``PhysicsSchemaTools.intToSdfPath`` call but is INJECTABLE,
+        and when left ``None`` it is resolved LAZILY on the first contact -- so ``subscribe`` itself imports
+        no ``pxr`` and the post-reset wiring is testable without usd-core."""
+        resolver = {'fn': decode_path}
 
         def _callback(headers, data):
             try:
+                fn = resolver['fn']
+                if fn is None:
+                    from pxr import PhysicsSchemaTools
+                    fn = resolver['fn'] = lambda i: str(PhysicsSchemaTools.intToSdfPath(i))
                 for header in headers:
-                    paths = [decode_path(getattr(header, k))
+                    paths = [fn(getattr(header, k))
                              for k in ('collider0', 'collider1', 'actor0', 'actor1')]
                     pts = data[header.contact_data_offset:header.contact_data_offset + header.num_contact_data]
                     sep = min((float(p.separation) for p in pts), default=0.0)
@@ -172,17 +205,47 @@ class PlaceContactLogger:
                 self.log('%s_ERROR %s' % (CONTACT_PAIR, exc))
 
         self._subscription = sim_interface.subscribe_contact_report_events(_callback)
+        return self._subscription
+
+    def attach(self, stage, sim_interface, *, apply_contact_report=None, decode_path=None,
+               threshold_m: float = 0.0):
+        """Author the contact-report API then subscribe, in one call. Convenience for a caller that holds the
+        stage BEFORE the view exists (and for the CPU attach test). Returns the number of bodies instrumented.
+        The VIEW-SAFE boot path does NOT use this -- it splits :meth:`author_contact_reports` (pre-reset, in
+        ``physics_setup.assemble``) from :meth:`subscribe` (post-reset, in ``isaac_factory.create``)."""
+        n = self.author_contact_reports(stage, apply_contact_report=apply_contact_report,
+                                        threshold_m=threshold_m, phase='attach')
+        self.subscribe(sim_interface, decode_path=decode_path)
         return n
 
     def detach(self):
         self._subscription = None
 
 
-def wire_place_contact_logger(assembly, config, *, log=print) -> Optional[PlaceContactLogger]:
-    """Boot-layer wiring (sim-pad-down-descent-jam-physics-v1): construct + attach a :class:`PlaceContactLogger`
-    when the ``place_contact_logger`` HOST/runtime block is present, else return ``None`` (byte-identical --
-    nothing is constructed, applied or subscribed). Called from ``isaac_factory.create`` with the live
-    ``assembly`` (its ``.stage`` + ``omni.physx`` simulation interface).
+def _build_logger_from_config(config, *, log=print) -> Optional[PlaceContactLogger]:
+    """Construct a :class:`PlaceContactLogger` from the ``place_contact_logger`` HOST/runtime block, or
+    ``None`` when the block is absent/false (byte-identical off -- nothing constructed). No Isaac import."""
+    block = config.get(PLACE_CONTACT_LOGGER_KEY)
+    if not block:
+        return None
+    opts = block if isinstance(block, dict) else {}
+    return PlaceContactLogger(
+        arm_prefixes=tuple(opts.get('arm_prefixes', DEFAULT_ARM_PREFIXES)),
+        carton_prefixes=tuple(opts.get('carton_prefixes', DEFAULT_CARTON_PREFIXES)),
+        cart_prefixes=tuple(opts.get('cart_prefixes', DEFAULT_CART_PREFIXES)),
+        deepen_step_m=float(opts.get('deepen_step_m', 0.005)), log=log)
+
+
+def wire_place_contact_logger_pre_reset(stage, config, *, log=print,
+                                        apply_contact_report=None,
+                                        is_rigid_body=None) -> Optional[PlaceContactLogger]:
+    """PRE-RESET half of the boot wiring (sim-place-contact-logger-view-safe-v1). Construct the logger and
+    AUTHOR the PhysX contact-report API onto the stage's rigid bodies BEFORE ``world.reset()`` creates the
+    tensor-backed simulation view -- so no prim the view covers is ever re-authored after the view exists
+    (the coldwin101 crash). Called from ``physics_setup.assemble`` right before ``world.reset()`` with the
+    live stage. Returns the AUTHORED-but-not-yet-subscribed logger (the caller stashes it on the assembly so
+    :func:`wire_place_contact_logger` can subscribe it post-reset), or ``None`` when the block is absent
+    (byte-identical -- nothing constructed, applied or imported).
 
     Block schema (all optional)::
 
@@ -194,23 +257,41 @@ def wire_place_contact_logger(assembly, config, *, log=print) -> Optional[PlaceC
             "cart_prefixes":  ["/Rollwagen"]
         }
 
-    A bare ``true`` uses all defaults. Returns the attached logger (so the caller can ``set_phase`` /
-    ``detach``)."""
-    block = config.get(PLACE_CONTACT_LOGGER_KEY)
-    if not block:
+    A bare ``true`` uses all defaults. ``apply_contact_report`` / ``is_rigid_body`` are injection seams for
+    the CPU ordering test; production leaves them ``None`` (the real ``PhysxSchema`` / ``UsdPhysics`` calls)."""
+    logger = _build_logger_from_config(config, log=log)
+    if logger is None:
         return None
+    block = config.get(PLACE_CONTACT_LOGGER_KEY)
     opts = block if isinstance(block, dict) else {}
-    logger = PlaceContactLogger(
-        arm_prefixes=tuple(opts.get('arm_prefixes', DEFAULT_ARM_PREFIXES)),
-        carton_prefixes=tuple(opts.get('carton_prefixes', DEFAULT_CARTON_PREFIXES)),
-        cart_prefixes=tuple(opts.get('cart_prefixes', DEFAULT_CART_PREFIXES)),
-        deepen_step_m=float(opts.get('deepen_step_m', 0.005)), log=log)
-    stage = getattr(assembly, 'stage', None)
+    n = logger.author_contact_reports(stage, apply_contact_report=apply_contact_report,
+                                      is_rigid_body=is_rigid_body,
+                                      threshold_m=float(opts.get('threshold_m', 0.0)), phase='pre-reset')
+    log('PLACE_CONTACT_LOGGER armed on %d rigid bodies (arm/gripper/carton vs cart) phase=%s bodies=%d -- '
+        'the contact-report API is authored BEFORE world.reset()/view creation (view-safe: arm DOF reads '
+        'keep working); the place-descent PhysX contact pair is logged as %s a=.. b=.. depth=.. at first '
+        'contact and on deepen, so the run NAMES the contact instead of leaving it to the model '
+        '(sim-place-contact-logger-view-safe-v1)'
+        % (n, logger._attach_phase, n, CONTACT_PAIR))
+    return logger
+
+
+def wire_place_contact_logger(assembly, config, *, log=print) -> Optional[PlaceContactLogger]:
+    """POST-RESET half of the boot wiring (sim-place-contact-logger-view-safe-v1): SUBSCRIBE the logger that
+    :func:`wire_place_contact_logger_pre_reset` already authored pre-reset. Called from
+    ``isaac_factory.create`` with the live ``assembly``. Subscribing registers a Python callback on the
+    omni.physx simulation interface -- it re-authors NO prim, so it is view-safe after ``world.reset()``.
+
+    Returns the subscribed logger (so the caller can ``set_phase`` / ``detach``), or ``None`` when no logger
+    was pre-authored (block absent => byte-identical, or the assembly did not run the pre-reset step). It
+    NEVER authors prims here -- doing so after the view exists is exactly the coldwin101 crash."""
+    logger = getattr(assembly, 'place_contact_logger', None)
+    if logger is None:
+        return None
     from omni.physx import get_physx_simulation_interface
     sim = get_physx_simulation_interface()
-    n = logger.attach(stage, sim, threshold_m=float(opts.get('threshold_m', 0.0)))
-    log('PLACE_CONTACT_LOGGER armed on %d rigid bodies (arm/gripper/carton vs cart) -- the place-descent '
-        'PhysX contact pair is now logged as %s a=.. b=.. depth=.. at first contact and on deepen, so the '
-        'run NAMES the contact instead of leaving it to the model (sim-pad-down-descent-jam-physics-v1)'
-        % (n, CONTACT_PAIR))
+    logger.subscribe(sim)
+    log('PLACE_CONTACT_LOGGER subscribed on %d bodies (attach phase=%s, view-safe post-reset) -- %s lines '
+        'will print at the place descent (sim-place-contact-logger-view-safe-v1)'
+        % (logger._armed_bodies, logger._attach_phase or 'pre-reset', CONTACT_PAIR))
     return logger
