@@ -59,6 +59,123 @@ def _hold_and_sample(stage, trace, phase, reset_pose, *, steps, sample_every, t0
             trace.add(phase, time.monotonic() - t0, probe.vram_used_mib())
 
 
+def _read_bind(stage, tick, phase, t0):
+    """One residual-bind sample dict (see release_jump_probe.classify_bind for the schema). Reads the
+    carton world pose+velocity, the gripper pad (TCP) world position, and the carton's live USD scene-
+    graph state after release: RigidBody kinematicEnabled, any carton-subtree CollisionAPI enabled, and
+    every stage joint whose body0/body1 targets the carton (+ its jointEnabled). Contacts come from the
+    bench's own PhysX contact reporting (probe_contacts), which is armed on carton+arm+chassis."""
+    from pxr import Usd, UsdPhysics
+    pos, _orient = stage.carton.get_world_pose()
+    try:
+        vel = stage.carton.get_linear_velocity()
+    except Exception:
+        vel = (0.0, 0.0, 0.0)
+    pad_t = stage._pad_world().ExtractTranslation()
+    usd = stage.stage
+    carton_prim = usd.GetPrimAtPath(stage.carton_path)
+    # kinematicEnabled
+    kin = None
+    try:
+        a = carton_prim.GetAttribute('physics:kinematicEnabled')
+        kin = bool(a.Get()) if (a and a.IsValid() and a.HasAuthoredValue()) else (
+            bool(UsdPhysics.RigidBodyAPI(carton_prim).GetKinematicEnabledAttr().Get())
+            if carton_prim.HasAPI(UsdPhysics.RigidBodyAPI) else None)
+    except Exception:
+        kin = None
+    # any carton-subtree collider enabled
+    coll = None
+    try:
+        states = []
+        for p in Usd.PrimRange(carton_prim):
+            if p.HasAPI(UsdPhysics.CollisionAPI):
+                v = UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr().Get()
+                states.append(bool(v) if v is not None else True)
+        coll = (any(states) if states else None)
+    except Exception:
+        coll = None
+    # every stage joint still targeting the carton
+    joint_refs = []
+    try:
+        cp = stage.carton_path
+        for p in usd.Traverse():
+            if not p.IsA(UsdPhysics.Joint):
+                continue
+            j = UsdPhysics.Joint(p)
+            tgts = []
+            for rel in (j.GetBody0Rel(), j.GetBody1Rel()):
+                if rel:
+                    tgts += [str(t) for t in rel.GetTargets()]
+            if any(cp in t for t in tgts):
+                en = p.GetAttribute('physics:jointEnabled')
+                enabled = bool(en.Get()) if (en and en.IsValid() and en.Get() is not None) else True
+                joint_refs.append({'path': str(p.GetPath()), 'enabled': enabled})
+    except Exception:
+        pass
+    contacts = []
+    try:
+        contacts = sorted({h.get('prim') for h in stage.probe_contacts() if h.get('prim')})
+    except Exception:
+        pass
+    return {'phase': phase, 'tick': int(tick), 't_s': round(time.monotonic() - t0, 3),
+            'carton_pos': [float(pos[0]), float(pos[1]), float(pos[2])],
+            'carton_vel': [float(vel[0]), float(vel[1]), float(vel[2])],
+            'pad_pos': [float(pad_t[0]), float(pad_t[1]), float(pad_t[2])],
+            'kinematic_enabled': kin, 'collision_enabled': coll,
+            'joint_refs': joint_refs, 'contacts': contacts}
+
+
+def _drive_to(stage, start, goal, *, steps, hold=False):
+    """Drive the arm from ``start`` toward ``goal`` over ``steps`` ticks via the real ArmCommandGate
+    (a slow position-tracked move when hold=False; a still hold at ``goal`` when hold=True), yielding
+    (tick, target) each tick AFTER stepping physics so the caller can sample post-step state."""
+    start = np.asarray(start, float)
+    goal = np.asarray(goal, float)
+    for i in range(steps):
+        frac = 1.0 if hold else (i + 1) / steps
+        target = start + frac * (goal - start)
+        stage.gate.apply(target, np.zeros(6), stage.gate.indices)
+        stage.world.step(render=True)
+        yield i, target
+
+
+def run_residual_bind(stage, args, summary):
+    """sim-place-release-residual-bind-v1 driver: raise the WELDED carton clear of the source, then
+    sample the bind EVERY tick across pre_release (still) -> real _release_fallback() -> post_release
+    (still, does it fall or hover?) -> a short further LIFT (does it track the arm?)."""
+    from twin.tools import release_jump_probe as _probe
+    grasp = np.asarray(stage.grasp_joints, float)
+    lift = np.asarray(stage.lift_joints, float)
+    # A) weld at grasp, then raise the welded carton to the lift pose so it is AIRBORNE (clear of the
+    #    source) before the release -- so a freed carton visibly falls and the fall/hover test is clean.
+    stage.reset_to_grasp(carry.REF_SOFT)
+    for _ in _drive_to(stage, grasp, lift, steps=args.raise_steps):
+        pass
+    for _ in _drive_to(stage, lift, lift, steps=args.settle_steps, hold=True):
+        pass
+    samples = []
+    t0 = time.monotonic()
+    tick = 0
+    # B) pre_release: arm still at the lift pose, carton still welded
+    for _, _tgt in _drive_to(stage, lift, lift, steps=args.pre_release_steps, hold=True):
+        samples.append(_read_bind(stage, tick, 'pre_release', t0)); tick += 1
+    # C) the REAL mission release
+    print('RESIDUAL_BIND detaching (contact._release_fallback) now', flush=True)
+    stage.contact._release_fallback()
+    # D) post_release_still: arm HELD at the lift pose -- a free carton falls, a bound one hovers
+    for _, _tgt in _drive_to(stage, lift, lift, steps=args.post_still_steps, hold=True):
+        samples.append(_read_bind(stage, tick, 'post_release_still', t0)); tick += 1
+    # E) a short further LIFT (continue the grasp->lift direction) -- does the carton track the arm?
+    lift_goal = lift + float(args.lift_frac) * (lift - grasp)
+    for _, _tgt in _drive_to(stage, lift, lift_goal, steps=args.lift_steps):
+        samples.append(_read_bind(stage, tick, 'lift', t0)); tick += 1
+    ev = _probe.classify_bind(samples)
+    print(_probe.format_bind(ev), flush=True)
+    summary.update(state='complete', reason='', residual_bind=ev, bind_samples=samples)
+    _persist(args.output / 'residual-bind.json', summary)
+    return 0
+
+
 def run(args):
     config = json.loads(args.runtime_config.read_text())
     scenario = json.loads(Path(config['scenario']).read_text())
@@ -134,6 +251,8 @@ def run(args):
                                           carton_dims=carton_dims)
             reset_pose = stage.lift_joints if stage.start_at_lift else stage.grasp_joints
             t0 = time.monotonic()
+            if args.residual_bind:
+                return run_residual_bind(stage, args, summary)
             # fm379 mitigation 1 (prewarm): BEFORE the measured sequence, run one weld+release cycle so
             # the RTX acceleration-structure pool is grown while VRAM has headroom; if the real release
             # then shows no jump, pre-warm is the fix. Gated on RESTOCK_PREWARM_ATTACH or --prewarm.
@@ -227,6 +346,20 @@ def main():
                    help='author the mission full camera set (4 station cams + walkthrough_chase) via _real_rig')
     p.add_argument('--prewarm', action='store_true',
                    help='run one weld+release cycle before the measured sequence (pre-size the RTX pool)')
+    p.add_argument('--residual-bind', action='store_true',
+                   help='sim-place-release-residual-bind-v1: raise the welded carton clear of the source, '
+                        'call the REAL contact._release_fallback(), and sample every tick across '
+                        'pre_release/post_release_still/lift to read which release bind survives (carton '
+                        'pose+velocity, kinematicEnabled, carton-targeting joints, collision-enabled, '
+                        'contacts). Writes residual-bind.json. Pass a runtime-config with release_detach '
+                        'on (or env RESTOCK_RELEASE_DETACH_ROBUST=1) to test the robust ordered detach.')
+    p.add_argument('--raise-steps', type=int, default=90, help='steps to raise the welded carton grasp->lift')
+    p.add_argument('--settle-steps', type=int, default=30, help='steps to settle at the lift pose before sampling')
+    p.add_argument('--pre-release-steps', type=int, default=10, help='still ticks sampled BEFORE the release')
+    p.add_argument('--post-still-steps', type=int, default=30, help='still ticks sampled AFTER the release (fall vs hover)')
+    p.add_argument('--lift-steps', type=int, default=60, help='ticks of the post-release further lift (slow)')
+    p.add_argument('--lift-frac', type=float, default=0.3,
+                   help='further-lift goal = lift + lift_frac*(lift-grasp); ~0.3 ~= a 60 mm pad rise')
     p.add_argument('--destroy-sensing', action='store_true',
                    help='fm380: after the welded baseline, DESTROY the collect-only station cameras '
                         '(source+shelf; keeps cart) and measure VRAM returned (needs --full-cameras)')

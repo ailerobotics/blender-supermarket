@@ -78,3 +78,48 @@ def test_format_verdict_mentions_detection_and_delta():
                               'peak_after_detach_mib': 10700, 'delta_mib': 2700, 'threshold_mib': 1000}
     s = probe.format_verdict(v)
     assert 'RELEASE_JUMP detected=True' in s and 'delta=2700' in s
+
+
+# ---- residual-bind classifier (sim-place-release-residual-bind-v1) ----
+def _bs(phase, z, vz=0.0, pad_z=1.0, *, kin=None, coll=None, joints=None, contacts=None,
+        x=0.0, pad_x=0.0):
+    return {'phase': phase, 'carton_pos': [x, 0.0, z], 'carton_vel': [0.0, 0.0, vz],
+            'pad_pos': [pad_x, 0.0, pad_z], 'kinematic_enabled': kin, 'collision_enabled': coll,
+            'joint_refs': list(joints or []), 'contacts': list(contacts or [])}
+
+
+def test_classify_bind_free_carton_falls_and_does_not_track():
+    # still: carton falls 40 mm under gravity while the arm holds; lift: pad rises, carton keeps falling
+    still = [_bs('post_release_still', 1.00 - 0.040 * i / 9, vz=-0.4 * i / 9, kin=False, coll=True)
+             for i in range(10)]
+    lift = [_bs('lift', 0.96 - 0.05 * i / 9, pad_z=1.00 + 0.06 * i / 9, kin=False) for i in range(10)]
+    ev = probe.classify_bind([_bs('pre_release', 1.0, kin=False)] + still + lift)
+    assert ev['verdict'] == 'free'
+    assert ev['still_fell'] and not ev['lift_tracks_arm']
+    assert ev['lift_follow_ratio'] < 0        # carton went the opposite way to the pad
+
+
+def test_classify_bind_kinematic_flag_survives():
+    still = [_bs('post_release_still', 1.00, kin=True, coll=False) for _ in range(10)]
+    lift = [_bs('lift', 1.00 + 0.06 * i / 9, pad_z=1.00 + 0.06 * i / 9, kin=True) for i in range(10)]
+    ev = probe.classify_bind(still + lift)
+    assert ev['verdict'] == 'kinematic_flag'
+    assert ev['kinematic_enabled'] is True
+
+
+def test_classify_bind_surviving_constraint_named():
+    j = [{'path': '/RestockPanelGripper/sim_attach_fallback', 'enabled': True}]
+    still = [_bs('post_release_still', 1.00, kin=False, joints=j) for _ in range(10)]
+    ev = probe.classify_bind(still)
+    assert ev['verdict'] == 'surviving_constraint'
+    assert '/RestockPanelGripper/sim_attach_fallback' in ev['bound_joint_paths']
+
+
+def test_classify_bind_pose_follow_hovers_and_tracks_no_flag():
+    # no kinematic flag, no joint, but the carton hovers (no fall) AND tracks the lift 1:1
+    still = [_bs('post_release_still', 1.00, kin=False, joints=[]) for _ in range(10)]
+    lift = [_bs('lift', 1.00 + 0.06 * i / 9, pad_z=1.00 + 0.06 * i / 9, kin=False) for i in range(10)]
+    ev = probe.classify_bind(still + lift)
+    assert ev['verdict'] == 'pose_follow'
+    assert ev['still_hovered'] and ev['lift_tracks_arm']
+    assert abs(ev['lift_follow_ratio'] - 1.0) < 0.05
