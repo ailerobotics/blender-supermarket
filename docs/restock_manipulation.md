@@ -682,6 +682,44 @@ proof (the centre-frame threshold at the cw87/83/85/86 numbers, the free-and-res
 following-refusal, OFF byte-identical, controller wiring):
 `scripts/twin/tests/test_release_threshold_carton_frame_v1.py`.
 
+### The physical seat, and the honest seat-gated release (sim-place-seat-geometry-v1)
+
+PR 374's premise above — *"the welded carton rested on the shelf at carton_z 0.6422"* — is **wrong**, and
+that is what made it calibrate the threshold to the stall instead of the seat. Established from the composed
+`mission.usda` (usd-core) **and** each run's `nav-trace.jsonl` carton WORLD poses (the test-backed CPU tool
+`scripts/check_place_seat_geometry.py` + `scripts/twin/restock_manipulation/place_seat_geometry.py`):
+
+- **The true seat** is the upper-shelf **FLAT TOP of the SETTLED cart**: carton **bottom 0.9325** world /
+  centre 1.0225 — proven by **coldwin83** (released + rested + verify PASSED, final carton centre 1.0225).
+- **The model support top `0.9707` is +38.2 mm too high**, in two parts: **+7.3 mm** because it resolves the
+  slightly-**tilted** shelf's world-AABB max-z **CORNER** (0.9712) instead of the **flat face** the carton
+  sits on (0.9639 at the composed pose), and **+31.4 mm** because it is read at the cart's **un-settled** build
+  chassis (z 0.2315) while the dynamic cart **settles ~3.1 cm** (chassis → ~0.20) by set-down. The carton
+  collider **half-height (0.09)** and the **carton-CENTRE frame** are **correct** — PR 374's `+half` fixed a
+  term that was already right.
+- **coldwin87's "solid stall" is carton bottom 1.0734 world = 14 cm ABOVE the true seat.** The carton is
+  filtered (`PhysicsFilteredPairsAPI`) against the **whole** rollwagen cage, so it collides only with the deck
+  (0.26) / shelf (0.9325) — both far below — and **rests on nothing**: it is held by the arm (effort peaked
+  **1013 N·m**) with a side-grip robot link jammed on the cage (robot links are **not** in the carton's cage
+  filter; the horizontal side-grip seal raycast sees nothing). So the stall is an **OBSTRUCTION**, not a shelf
+  contact; releasing there drops the carton 14 cm (cw85/86 fell off during the retreat; cw83 happened to rest).
+
+**Fix (`carton_level.place_seat_gate`, requires `place_release_on_contact`; opt-in, default off ⇒ byte-identical).**
+The `place_release.PlaceReleaseGate` is armed with the corrected seat (support TOP + carton half, in the
+measured `placed_pose` carton-centre / `ur_base_link` frame) and `place_seat_tol_m` (0.02 m). A measured
+contact releases the weld **only** within tol of the seat; a contact well **above** the seat is
+`PLACE_OBSTRUCTED` (bounded lateral re-approach, else fail by name) — never a 14 cm drop; a descent that
+reaches/passes the seat with **no** contact is a named `PLACE_SEAT_FAULT`. The release threshold becomes the
+**absolute** seat (`support_top + half`), **not** PR 374's relative `placed_pose − drop + gap + half`, so it
+can never sit **above the descent start** — the controller asserts that by name (`PLACE_SEAT_THRESHOLD_ABOVE_START`,
+the coldwin89 bug) at arm time, and `place_release_stall_height_margin_m` is retired. The support top is
+resolved as the slab **flat top face** of the live cart with the env `RESTOCK_PLACE_SUPPORT_FLAT_TOP=1`
+(`cart_support.slab_flat_top_z_world`; default off ⇒ the AABB corner, byte-identical). The shared predicate is
+`place_seat_geometry.classify_set_down`; `release_free_check` / `release_reissue` still guard the retreat once a
+true set-down occurs. ON values + the bounded GPU proof: `docs/examples/place-seat-geometry-fragment.json`;
+CPU proof (the geometry derivation, the seat-gate triggers, the cw83/85/86/87/88/89 replays, OFF
+byte-identical): `scripts/twin/tests/test_place_seat_geometry.py`.
+
 ## Place-on-cart between-posts target (sim-place-target-between-posts-v1)
 
 The collect place-on-cart load-centre on the rollwagen **upper shelf** is moved from the old
