@@ -99,6 +99,12 @@ class PlaceContactLogger:
     deepen_step_m: float = 0.005
     log: Callable[[str], None] = print
     phase: str = 'place'
+    # sim-place-release-residual-bind-v1: substrings that mark a CART prim as the placement SUPPORT (deck /
+    # shelf) rather than an obstruction (post / bar). A carton-vs-support contact is the POSITIVE freedom
+    # signal the release_free_positive gate consumes (``support_contact_seen``); a carton-vs-post contact is
+    # NOT support. Lower-cased substring match on the cart-side prim path.
+    support_tokens: Tuple[str, ...] = ('deck', 'shelf', 'support', 'bay')
+    _support_seen: bool = False
     _seen: Dict[Tuple[str, str], float] = field(default_factory=dict)
     _subscription: object = None
     _armed_bodies: int = 0          # rigid bodies the contact-report API was authored onto
@@ -125,9 +131,27 @@ class PlaceContactLogger:
         else:
             return None
         self._seen[key] = pen
+        # sim-place-release-residual-bind-v1: latch a carton-vs-SUPPORT contact (the free-release positive
+        # signal). Only a CARTON side touching a cart prim whose path names a support (deck/shelf) counts --
+        # a carton-vs-post contact is an obstruction, not support, and an arm/gripper contact is not the
+        # carton resting. Monotonic until clear_support_contact() (reset at the detach by the bridge).
+        if kind == 'carton':
+            bl = str(b).lower()
+            if any(tok in bl for tok in self.support_tokens):
+                self._support_seen = True
         line = format_contact_line(a, b, separation_m, phase=self.phase, event=event, kind=kind)
         self.log(line)
         return line
+
+    def support_contact_seen(self) -> bool:
+        """sim-place-release-residual-bind-v1: True when a carton-vs-SUPPORT contact pair has been observed
+        since the last :meth:`clear_support_contact`. The POSITIVE freedom signal the release_free_positive
+        gate reads (a welded carton held OFF the deck reports none). PURE (no Isaac)."""
+        return bool(self._support_seen)
+
+    def clear_support_contact(self) -> None:
+        """Reset the carton-vs-support latch (call at the weld detach so the release window starts clean)."""
+        self._support_seen = False
 
     def handle_header_paths(self, paths, separation_m) -> Optional[str]:
         """Classify ``paths`` and, if a robot/carton-vs-cart contact, log it. Returns the line or ``None``.

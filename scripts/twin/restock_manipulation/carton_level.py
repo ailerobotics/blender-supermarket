@@ -846,6 +846,18 @@ class LevelConfig:
     # the carton rises past this threshold -- naming a still-coupled carton early and non-destructively,
     # before the lateral retreat. Needs ``release_free_check``.
     release_free_coupled_abort_m: object = None    # None => off; a finite positive metre threshold => on
+    # sim-place-release-residual-bind-v1 (opt-in; default off => byte-identical, the legacy settle() owns the
+    # hold): the POSITIVE free check. coldwin106's "RELEASE_FREE at rest, stable 5 ticks" passed because the
+    # SURVIVING weld held the carton RIGID at seat height (bottom_gap -0.2 mm, dz ~0) -- the legacy settle()
+    # read the WELD holding it stable+resting, not the deck supporting it. With ``release_free_positive`` on,
+    # the hold requires a POSITIVE proof a bound carton cannot satisfy before the clearance lift (via
+    # ``release_free.ReleaseFreeGate.free_proof``): EITHER a reported carton-vs-support contact pair (carried
+    # on the packet ``carton_support_contact``, populated by the PR 384 place-contact logger) OR a measured
+    # SETTLE (a drop of at least ``release_free_settle_drop_min_m`` onto the support, then rest). Neither
+    # within ``release_free_settle_window_ticks`` => RELEASE_NOT_FREE kind=no-support-contact, WITHOUT the
+    # destructive lift. Needs ``release_free_check``. Pairs with the RUNTIME ``release_residual_bind`` clear.
+    release_free_positive: bool = False
+    release_free_settle_drop_min_m: float = 0.003  # min carton drop onto the support that counts as a settle
     # sim-place-seat-geometry-v1 (brief parts 2+3): the HONEST seat-gated place release. The collect set-down
     # release must fire ONLY when a measured contact (stall/effort) is within ``place_seat_tol_m`` of the
     # CORRECTED modelled seat (support TOP + carton half, carton-centre frame). coldwin87's "solid stall" was
@@ -1046,7 +1058,8 @@ class LevelConfig:
         # sim-release-threshold-carton-frame-v1
         for nm, v in (('release_free_stable_eps_m', self.release_free_stable_eps_m),
                       ('release_free_rest_gap_m', self.release_free_rest_gap_m),
-                      ('release_free_lift_dz_m', self.release_free_lift_dz_m)):
+                      ('release_free_lift_dz_m', self.release_free_lift_dz_m),
+                      ('release_free_settle_drop_min_m', self.release_free_settle_drop_min_m)):
             if not (math.isfinite(float(v)) and float(v) > 0):
                 raise ValueError(f'carton_level.{nm} must be a finite positive number of metres')
         if not (math.isfinite(float(self.release_free_follow_frac))
@@ -1206,7 +1219,7 @@ def resolve_level_config(spec):
                  'preplace_seeded_interior', 'preplace_branch_prefer_carry_connected',
                  'preplace_descent_feasible',
                  'place_release_on_contact', 'release_cancel_handshake', 'release_reissue',
-                 'release_free_check', 'place_seat_gate', 'place_pad_down_arrival',
+                 'release_free_check', 'release_free_positive', 'place_seat_gate', 'place_pad_down_arrival',
                  'place_housing_seat', 'place_descent_monotonic_z'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
@@ -1214,7 +1227,7 @@ def resolve_level_config(spec):
     for fnum in ('place_release_effort_margin_nm', 'place_release_stall_m', 'place_obstruction_gap_mm',
                  'place_reapproach_shift_m', 'release_cancel_stopped_vel', 'release_confirm_timeout_s',
                  'release_free_stable_eps_m', 'release_free_rest_gap_m', 'release_free_lift_dz_m',
-                 'release_free_follow_frac', 'place_seat_tol_m'):
+                 'release_free_follow_frac', 'release_free_settle_drop_min_m', 'place_seat_tol_m'):
         if spec.get(fnum) is not None:
             kw[fnum] = float(spec[fnum])
     for fint in ('place_release_effort_consecutive', 'place_release_stall_ticks', 'place_reapproach_max',

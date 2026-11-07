@@ -113,6 +113,14 @@ class Sensors:
     # byte-identical. Carried across the asdict -> JSON -> Sensors(**data) ROS boundary like the fields above.
     arm_effort_max: float | None = None
     seal_hit_prims: tuple[str, ...] | None = None
+    # sim-place-release-residual-bind-v1 (opt-in; default False => byte-identical): True when a carton-vs-
+    # SUPPORT contact pair has been reported (by the PR 384 place-contact logger / a direct contact query)
+    # since the weld detach -- the POSITIVE freedom signal the controller's release_free_positive gate needs
+    # that placed_pose alone cannot give (a surviving weld holds the carton stable+resting at seat height
+    # with ZERO support contact). The Isaac driver (CollectTargetBridge) sets it only when the contact-status
+    # relay + the place-contact logger are both on; the host gate consumes it only when release_free_positive
+    # is on. Carried across the asdict -> JSON -> Sensors(**data) ROS boundary like the fields above.
+    carton_support_contact: bool = False
     # Driver must reject stale/absent joint/contact/odom data before making a packet.
 
 

@@ -1052,6 +1052,57 @@ values + acceptance: `docs/examples/release-detach-carton-stays-fragment.json`; 
 pxr, the per-tick coupled-rise abort, config wiring): `scripts/twin/tests/test_release_detach_carton_stays_v1.py`.
 Write-up: `data/sim-place-release-carton-stays-v1/report.md`.
 
+#### Name the residual bind and prove freedom positively (sim-place-release-residual-bind-v1)
+
+coldwin106 ran PR 389's robust detach **ON** and still `HOST_FAULT_ESTOP 'RELEASE_NOT_FREE: carton rose
+0.0200 m with the gripper during the clearance lift'`: the carton rose a near-pure vertical **+19 mm** with the
+gripper (x/y stable to 0.1 mm), the PR 384 logger saw **zero** carton-vs-support contacts, and the legacy
+`RELEASE_FREE` *"at rest, stable 5 ticks"* passed first. **Root cause (the fm release-jump bench,
+`data/twin-robot-in-store-boot-v1/cw106-residual-bind-bench.md`):** with only the SIM_ATTACH weld + robust
+detach the carton is **fully freed** (joints `1 → 0`, `kinematicEnabled` False, free-falls, lands, reports
+`CONTACT_PAIR HandlingUnit<->Backroom_floor`) — so the weld is **not** the bind and the logger **does** report a
+free carton; and `object_attachment` is **not** the bind (CPU-traced: it only writes XRDF spheres). The
+**confirmed** cause (per-collider audit on the mission scene): `cad_tool._set_carton_collision` disables the
+tool-side colliders via `stage.Traverse()`, which **skips instance proxies** — only `suction_cups` was ever
+de-instanced (by `author_native_gripper`), so `surface_plate_1..6` + `cube_without_surface_plates` stay **LIVE
+instance proxies** (`enabled=True proxy=True`) through carry **and** release (the carry-disable's *"2
+collider(s)"* is carton + suction_cups only). At the pressed set-down (`SEAL_DIAG min_gap 0.0`) the live panels
+sit coincident with the carton face, so the re-enabled carton gets a **penetration contact** whose friction
+drags it up on the clearance lift — invisible to the carton-vs-cart-filtered logger (hence `CONTACT_PAIR = 0`).
+
+**The cure + three layered opt-in fixes** (default off ⇒ byte-identical, one RUNTIME switch
+`release_residual_bind`). **(0) De-instance the panel colliders** (`cad_tool.deinstance_panel_colliders` via
+`author_native_gripper(deinstance_tool_colliders=…)`, wired from `physics_setup.assemble`): **pre-physics** —
+the same safe window as the existing `suction_cups` de-instance — de-instance the `surface_plate`/`cube`
+collider subtrees so `_set_carton_collision`'s `stage.Traverse()` **reaches and authors** them; the carry-disable
+then covers **all** tool-side colliders and the release deferral keeps them off, so no live panel is coincident
+with the carton at release (acceptance: `RELEASE_COUPLING_DIAG gripper_colliders_live=[]`). **(1) Physics-layer
+residual-bind query+clear**
+(RUNTIME `release_residual_bind`; `release_residual_bind.clear_residual_binds` + `cad_tool` adapter): after the
+ordered detach, query the carton's **full sim state** — joints targeting it (the bench's `#joints` column),
+`kinematicEnabled`, USD parent (reparent?), `rigidBodyEnabled`, and **every gripper collider's enabled state**
+(the pad-friction suspect) — **clear** the safely-undoable couplings (drop surviving joints, clear kinematic,
+re-enable a disabled rigid body, **disable any tool-side gripper collider still enabled at release** so it
+cannot drag the carton), `physx_resync()`, re-query and **log each by name**: `RELEASE_RESIDUAL_BIND_STATE
+before/after` + `RELEASE_RESIDUAL_BIND kind=joint|kinematic|rigid_body|tool_collider|reparent|gripper_collider|none
+cleared=…`. A reparent / a host per-tick pose-write it cannot stop is **named** (so the next run pinpoints it),
+not silently ignored. **(2) Positive free check** (HOST `carton_level.release_free_positive`,
+`release_free.ReleaseFreeGate.free_proof`) — **the mechanism-agnostic robustness win:** the legacy settle
+passed because a bound carton held at seat reads *stable + resting*; the positive check instead requires a
+proof a bound carton **cannot** satisfy before the clearance lift — **either** a reported carton-vs-support
+contact (`carton_support_contact`, latched from the PR 384 logger and carried on `/sensors`) **or** a measured
+**settle drop** of ≥ `release_free_settle_drop_min_m` onto the support, then rest — else `RELEASE_NOT_FREE
+kind=no-support-contact` **without lifting**. A carton bound by a weld, `object_attachment`, or pad friction
+shows neither signal, so it is refused by name rather than carried off. **(3)** PR 389's per-tick
+`release_free_coupled_abort_m` stays the **backstop** during the lift. Recommended ON values + acceptance (plus
+the `RESTOCK_VERIFY_PLACE` / `RESTOCK_CONTACT_STATUS_FEEDBACK` envs the contact path needs):
+`docs/examples/release-residual-bind-fragment.json`; CPU proof (the ordered residual-bind query/clear + its
+record, the positive free check accepting a contact pair **or** a settle and refusing a bound carton
+exact-follow+no-contact, the gripper-collider sweep, config wiring on/off, the packet field):
+`scripts/twin/tests/test_release_residual_bind_v1.py`. Write-up (with the mechanism table + the follow-up
+candidates — complete the tool-collider deferral set, a −normal pad back-off before the vertical lift):
+`data/sim-place-release-residual-bind-v1/report.md`.
+
 ### The physical seat, and the honest seat-gated release (sim-place-seat-geometry-v1)
 
 PR 374's premise above — *"the welded carton rested on the shelf at carton_z 0.6422"* — is **wrong**, and

@@ -183,6 +183,11 @@ KEY_CONSUMER = {
     # it via release_detach.robust_detach_enabled (RUNTIME); env RESTOCK_RELEASE_DETACH_ROBUST is the alias.
     # Default OFF => byte-identical.
     'release_detach': RUNTIME,
+    # sim-place-release-residual-bind-v1: physics-layer residual-bind query+clear AFTER the ordered detach
+    # (query the carton's surviving joints + kinematic flag, clear each, reconcile PhysX, log
+    # RELEASE_RESIDUAL_BIND by name). isaac_factory reads it via release_residual_bind.residual_bind_clear_enabled
+    # (RUNTIME); env RESTOCK_RELEASE_RESIDUAL_BIND is the alias. Default OFF => byte-identical.
+    'release_residual_bind': RUNTIME,
     'sim_speed': RUNTIME,        # sim-video-speedup-v1 speed profile; isaac_bundle/isaac_port + bt view read it
     # sim-robust-cart-place-descent-v1: bounded base-settle tolerance for the loaded collect place;
     # isaac_bundle builds the RuntimeAdapter with it (orchestrate process), NOT ros_host.

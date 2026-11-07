@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from .transfer_carry import weld_attach as _weld_attach
 from .cad_tool import defer_tool_collision_enabled as _defer_tool_collision
 from . import release_detach as _release_detach
+from . import release_residual_bind as _release_residual_bind
 from .transfer_mode import LIVE_POSE, transfer_mode
 from . import config_access
 from . import ground_truth_collect as gtc
@@ -133,6 +134,7 @@ class ManipConfig:
     sim_attach_fallback: bool = False  # labelled sim attach-fallback (cad_tool); default OFF, see SIM_ATTACH_CONTACT_MM
     defer_tool_collision: bool = True  # sim-collect-retreat-collider-v3: defer tool-side collider re-enable past the retreat (DEFAULT ON)
     release_detach_robust: bool = False  # sim-place-release-carton-stays-v1: robust ordered weld detach (default OFF => byte-identical)
+    release_residual_bind_clear: bool = False  # sim-place-release-residual-bind-v1: physics-layer residual-bind query+clear after detach (default OFF)
     station_heartbeat_s: float = 10.0  # StationClient wall heartbeat-unavailable bound; real-rig 10 s, sim raises it
     station_stage_unavailable_s: float = 3.0  # StationClient sim-clock (stage) supervisor-liveness bound (primary)
     gt_place_slot: dict = field(default_factory=dict)  # collect-gt: warm-shortcut place slot (ground-truth collect only)
@@ -241,6 +243,7 @@ def parse_manipulation_config(config, job_sku):
                        sim_attach_fallback=_weld_attach(config),
                        defer_tool_collision=_defer_tool_collision(config),
                        release_detach_robust=_release_detach.robust_detach_enabled(config),
+                       release_residual_bind_clear=_release_residual_bind.residual_bind_clear_enabled(config),
                        station_heartbeat_s=float(config.get('station_heartbeat_s', 10.0)),
                        station_stage_unavailable_s=float(config.get('station_stage_unavailable_s', 3.0)))
 
@@ -537,10 +540,30 @@ class CollectTargetBridge:
             if eff is not None:
                 kwargs = dict(kwargs)
                 kwargs['arm_effort_max'] = float(eff)
+        # sim-place-release-residual-bind-v1: carry the carton-vs-support contact flag for the host
+        # release_free_positive gate. Only when a probe is wired (the place-contact logger is on); absent =>
+        # the packet field stays False => byte-identical.
+        probe = getattr(self, 'support_contact_probe', None)
+        if probe is not None:
+            try:
+                sc = bool(probe())
+            except Exception:
+                sc = False
+            kwargs = dict(kwargs)
+            kwargs['carton_support_contact'] = sc
         return kwargs
 
     def set_shelf_target_provider(self, provider):
         self.shelf_provider = provider
+
+    # sim-place-release-residual-bind-v1: a callable() -> bool reporting whether a carton-vs-SUPPORT contact
+    # has been observed since the detach (built from the PR 384 place-contact logger in create()). None =>
+    # the packet field stays its inert default => byte-identical. Consumed only when the contact-status
+    # relay is on AND the host release_free_positive gate is on.
+    support_contact_probe = None
+
+    def set_support_contact_probe(self, probe):
+        self.support_contact_probe = probe
 
     def _arm_base_from_camera(self):
         import numpy as np
@@ -1258,7 +1281,8 @@ def _build_runtime(*, app, assembly, params, output):
     gripper_path = '/RestockPanelGripper'
     contact = NativePanelContact(stage, gripper_path, sim_attach_fallback=params.sim_attach_fallback,
                                  defer_tool_collision=params.defer_tool_collision,
-                                 release_detach_robust=params.release_detach_robust)
+                                 release_detach_robust=params.release_detach_robust,
+                                 release_residual_bind=params.release_residual_bind_clear)
     source = params.stations['source']
     if not params.pose_bridge_root:
         raise ValueError('runtime-config pose_bridge_root (tray-perception root) required')
@@ -1459,6 +1483,15 @@ def create(*, app, assembly, plan, config, output, _builder=None):
     try:
         from twin.restock_manipulation.place_contact_logger import wire_place_contact_logger
         runtime._place_contact_logger = wire_place_contact_logger(assembly, config)
+        # sim-place-release-residual-bind-v1: feed the carton-vs-support contact flag from this logger onto
+        # the host-facing /sensors packet, so the host release_free_positive gate can read it. Only when the
+        # logger exists (opt-in) => byte-identical off.
+        _pcl = runtime._place_contact_logger
+        if _pcl is not None:
+            collect_bridge.set_support_contact_probe(_pcl.support_contact_seen)
+            # reset the carton-vs-support latch at each weld detach (_release_fallback) so the post-detach
+            # free-check window is fresh -- only the FREED carton's rest contact counts.
+            contact._support_contact_reset = _pcl.clear_support_contact
     except Exception as exc:                                       # pragma: no cover - needs a live Isaac
         print('PLACE_CONTACT_LOGGER subscribe skipped (%s)' % exc, flush=True)
 
