@@ -376,6 +376,17 @@ def main():
     payload.controller = controller
     # Late-bind the live controller into the perceived-clearance gate's phase/held/carton reads.
     _gate_ctrl['c'] = controller
+    # sim-place-descent-reach-wire-v1: INJECT the cart cage-clearance providers (PR 366 carried pre-place
+    # sweep + PR 376 collect place-DESCENT sweep) onto the controller from the HOST config. Both providers
+    # (place_clearance.preplace_cage_clearance_provider / .place_descent_cage_clearance_provider) ship with
+    # the controller hooks they feed (_preplace_cage_clearance / _place_descent_cage_gate) but had ZERO call
+    # sites, so both hooks stayed None and the in-op gates never ran -- coldwin90 (every PR 376 switch ON)
+    # repeated run 89/90 exactly (PLACE_SEAT_GATE_ARM / PLACE_OBSTRUCTED +87 mm / descent never started). The
+    # blocks carry the live coupled cart-body -> ur_base_link pose + host XRDF; absent => the hooks stay None
+    # => byte-identical. Loud at boot (PREPLACE_CAGE_GATE / PLACE_DESCENT_CAGE_GATE 'armed'); raises on a
+    # malformed block so a configured gate can never again be left uncalled.
+    from .place_cage_wiring import wire_place_cage_gates
+    wire_place_cage_gates(controller, config, args.urdf)
     # sim-arm-reactive-replan-v1 (PR-B): wire the execution-time corridor watch to the sibling's
     # perceived-clearance ESDF source (the wrapped GatedMotionPort). Inert unless BOTH
     # reactive_arm_replan and perception_collision_gate are on (the watch needs the live ESDF).
@@ -530,6 +541,11 @@ def main():
         # sim-preplace-wrist2-hold-v1: effective drift re-capture bound (rad) + per-joint budget (0 = off).
         'preplace_drift_recapture_rad': controller.preplace_drift_recapture_rad,
         'preplace_drift_recapture_max': controller.preplace_drift_recapture_max,
+        # sim-place-descent-reach-wire-v1: whether the cart cage-clearance providers were INJECTED (True =
+        # the in-op gate is live; False = the hook stayed None => byte-identical). The 'armed' log line above
+        # carries the margin / xrdf / cart_pose when True.
+        'preplace_cage_gate': controller._preplace_cage_clearance is not None,
+        'place_descent_cage_gate': controller._place_descent_cage_gate is not None,
     }), flush=True)
     # sim-collision-dt-render-lead-floor-v1: log the DERIVED collision/feedback freshness band once at
     # host start, so every run dir's host-stack.log records the floor/ceiling in force (the future-lead
