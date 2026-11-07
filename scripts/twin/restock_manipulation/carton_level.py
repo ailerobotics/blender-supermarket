@@ -839,6 +839,13 @@ class LevelConfig:
     release_free_settle_window_ticks: int = 60     # bounded hold before refusing RELEASE_NOT_FREE (not at rest)
     release_free_lift_dz_m: float = 0.06           # pure vertical clearance lift before the lateral retreat
     release_free_follow_frac: float = 0.5          # carton rose >= this fraction of the lift => followed => refuse
+    # sim-place-release-carton-stays-v1 (opt-in; None => off => byte-identical): the PER-TICK coupled-rise
+    # abort during the clearance lift. coldwin105's weld persisted after the detach so the carton rose
+    # 0.1494 m with the gripper before the lift-completion follow() caught it (then the re-begin lost the arm
+    # heartbeat). With this set, the lift is polled each tick and FAILS BY NAME (RELEASE_NOT_FREE) the instant
+    # the carton rises past this threshold -- naming a still-coupled carton early and non-destructively,
+    # before the lateral retreat. Needs ``release_free_check``.
+    release_free_coupled_abort_m: object = None    # None => off; a finite positive metre threshold => on
     # sim-place-seat-geometry-v1 (brief parts 2+3): the HONEST seat-gated place release. The collect set-down
     # release must fire ONLY when a measured contact (stall/effort) is within ``place_seat_tol_m`` of the
     # CORRECTED modelled seat (support TOP + carton half, carton-centre frame). coldwin87's "solid stall" was
@@ -1053,6 +1060,12 @@ class LevelConfig:
         if self.release_free_settle_window_ticks < self.release_free_settle_ticks:
             raise ValueError('carton_level.release_free_settle_window_ticks must be >= '
                              'release_free_settle_ticks (the bounded hold must allow the settle streak)')
+        # sim-place-release-carton-stays-v1: nullable per-tick coupled-rise abort threshold.
+        if self.release_free_coupled_abort_m is not None and not (
+                math.isfinite(float(self.release_free_coupled_abort_m))
+                and float(self.release_free_coupled_abort_m) > 0):
+            raise ValueError('carton_level.release_free_coupled_abort_m must be None or a finite positive '
+                             'number of metres (the per-tick coupled-rise abort during the clearance lift)')
         if (isinstance(self.place_support_tokens, str) or not hasattr(self.place_support_tokens, '__iter__')
                 or not tuple(self.place_support_tokens)
                 or not all(isinstance(t, str) and t for t in self.place_support_tokens)):
@@ -1215,6 +1228,10 @@ def resolve_level_config(spec):
     # sim-place-verify-rest-tolerance-v1 (nullable metres; absent => None => stall trigger unchanged)
     if spec.get('place_release_stall_height_margin_m') is not None:
         kw['place_release_stall_height_margin_m'] = float(spec['place_release_stall_height_margin_m'])
+    # sim-place-release-carton-stays-v1 (nullable metres; absent => None => the per-tick coupled-rise abort
+    # is off => byte-identical, the lift-completion follow() owns the coupled-rise check).
+    if spec.get('release_free_coupled_abort_m') is not None:
+        kw['release_free_coupled_abort_m'] = float(spec['release_free_coupled_abort_m'])
     # sim-place-descent-stall-false-start-v1: the opt-in stall arming + its threshold keys (absent => None
     # arming => byte-identical). The arming string is passed through as-is so validate() names a bad value.
     if spec.get('place_release_stall_arming') is not None:

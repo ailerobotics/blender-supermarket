@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 
 from .transfer_carry import weld_attach as _weld_attach
 from .cad_tool import defer_tool_collision_enabled as _defer_tool_collision
+from . import release_detach as _release_detach
 from .transfer_mode import LIVE_POSE, transfer_mode
 from . import config_access
 from . import ground_truth_collect as gtc
@@ -131,6 +132,7 @@ class ManipConfig:
     arm_camera_reaim: dict = field(default_factory=dict)  # {origin, aim_targets} in ur_base for the look-at mount (camera lane PR64)
     sim_attach_fallback: bool = False  # labelled sim attach-fallback (cad_tool); default OFF, see SIM_ATTACH_CONTACT_MM
     defer_tool_collision: bool = True  # sim-collect-retreat-collider-v3: defer tool-side collider re-enable past the retreat (DEFAULT ON)
+    release_detach_robust: bool = False  # sim-place-release-carton-stays-v1: robust ordered weld detach (default OFF => byte-identical)
     station_heartbeat_s: float = 10.0  # StationClient wall heartbeat-unavailable bound; real-rig 10 s, sim raises it
     station_stage_unavailable_s: float = 3.0  # StationClient sim-clock (stage) supervisor-liveness bound (primary)
     gt_place_slot: dict = field(default_factory=dict)  # collect-gt: warm-shortcut place slot (ground-truth collect only)
@@ -238,6 +240,7 @@ def parse_manipulation_config(config, job_sku):
                        cart_placement=cart_placement, arm_camera_reaim=arm_camera_reaim,
                        sim_attach_fallback=_weld_attach(config),
                        defer_tool_collision=_defer_tool_collision(config),
+                       release_detach_robust=_release_detach.robust_detach_enabled(config),
                        station_heartbeat_s=float(config.get('station_heartbeat_s', 10.0)),
                        station_stage_unavailable_s=float(config.get('station_stage_unavailable_s', 3.0)))
 
@@ -1254,7 +1257,8 @@ def _build_runtime(*, app, assembly, params, output):
 
     gripper_path = '/RestockPanelGripper'
     contact = NativePanelContact(stage, gripper_path, sim_attach_fallback=params.sim_attach_fallback,
-                                 defer_tool_collision=params.defer_tool_collision)
+                                 defer_tool_collision=params.defer_tool_collision,
+                                 release_detach_robust=params.release_detach_robust)
     source = params.stations['source']
     if not params.pose_bridge_root:
         raise ValueError('runtime-config pose_bridge_root (tray-perception root) required')

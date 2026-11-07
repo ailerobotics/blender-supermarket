@@ -178,6 +178,11 @@ KEY_CONSUMER = {
     # retreat (DEFAULT ON). isaac_factory.parse_manipulation_config reads it (RUNTIME); env
     # RESTOCK_DEFER_TOOL_COLLISION is the alias. Registered so a run can --require it (assert ON).
     'defer_tool_collision': RUNTIME,
+    # sim-place-release-carton-stays-v1: robust ordered sim-attach-fallback detach (disable+clear the weld
+    # joint before RemovePrim, then free-dynamic + zero residual velocity). isaac_factory/physics_setup read
+    # it via release_detach.robust_detach_enabled (RUNTIME); env RESTOCK_RELEASE_DETACH_ROBUST is the alias.
+    # Default OFF => byte-identical.
+    'release_detach': RUNTIME,
     'sim_speed': RUNTIME,        # sim-video-speedup-v1 speed profile; isaac_bundle/isaac_port + bt view read it
     # sim-robust-cart-place-descent-v1: bounded base-settle tolerance for the loaded collect place;
     # isaac_bundle builds the RuntimeAdapter with it (orchestrate process), NOT ros_host.

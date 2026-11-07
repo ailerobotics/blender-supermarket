@@ -1060,8 +1060,10 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # OFF; the real rig never runs this native authoring.
     # RESTOCK_TRANSFER_CARRY=weld also turns it on (labelled transfer_attach=weld; transfer_carry.weld_attach).
     from ..restock_manipulation.transfer_carry import weld_attach as _weld_attach
+    from ..restock_manipulation.release_detach import robust_detach_enabled as _robust_detach
     contact=NativePanelContact(stage,'/RestockPanelGripper',
-                               sim_attach_fallback=_weld_attach(config))
+                               sim_attach_fallback=_weld_attach(config),
+                               release_detach_robust=_robust_detach(config))
     # Wire the load-aware FF payload term to the canonical gripper latch: the payload gravity is added
     # only while the carton is actually held (contact.read() honours the shared stage weld). Off => the
     # holder stays None => no payload term, so a run without arm_gravity_ff_loaded_carry is byte-identical.

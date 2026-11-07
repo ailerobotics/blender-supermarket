@@ -432,7 +432,7 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
 class NativePanelContact:
     """Native contact/latch feedback only; zero fallback welds or object poses."""
     def __init__(self, stage, gripper_path, *, diagnostic=None, sim_attach_fallback=False,
-                 defer_tool_collision=None):
+                 defer_tool_collision=None, release_detach_robust=None):
         import isaacsim.robot.surface_gripper._surface_gripper as surface_gripper
         self.stage, self.path = stage, gripper_path
         # Labelled sim attach-fallback, default OFF (see SIM_ATTACH_CONTACT_MM). _fallback_body holds the
@@ -456,6 +456,22 @@ class NativePanelContact:
         self._defer_tool_collision = (bool(defer_tool_collision) if defer_tool_collision is not None
                                       else defer_tool_collision_enabled())
         self._tool_collision_deferred = False   # True while a release left the tool-side colliders disabled
+        # sim-place-release-carton-stays-v1 (opt-in; DEFAULT OFF => byte-identical). coldwin105 proved that
+        # stage.RemovePrim(<gripper>/sim_attach_fallback) removes the USD prim (so read() -> held=False) but
+        # does NOT drop the FixedJoint's PhysX constraint at runtime: the carton stayed rigidly welded to the
+        # gripper through the whole clearance lift (const 0.0 mm pad gap + 0.0 deg pad-vs-face while the carton
+        # centre rose 0.1494 m) with ZERO carton-vs-cart contact. With this on, _release_fallback drops the
+        # constraint EXPLICITLY (clear body0/body1 + jointEnabled=False) before the prim removal, then makes
+        # the carton a free dynamic body with zeroed residual velocity -- so the freed carton settles onto the
+        # shelf instead of following the gripper. See release_detach.robust_detach_enabled.
+        from . import release_detach as _release_detach_mod
+        self._release_detach_robust = (bool(release_detach_robust) if release_detach_robust is not None
+                                       else _release_detach_mod.robust_detach_enabled())
+        if self._sim_attach_fallback and self._release_detach_robust:
+            print('SIM_ATTACH_FALLBACK release-detach ROBUST armed (sim-place-release-carton-stays-v1): the '
+                  'weld joint is disabled (body rels cleared + jointEnabled=False) BEFORE RemovePrim and the '
+                  'freed carton is made dynamic with zeroed residual velocity, so a runtime prim removal that '
+                  'does not re-sync still drops the PhysX constraint', flush=True)
         self.api = surface_gripper.acquire_surface_gripper_interface()
         self.api.set_write_to_usd(True)
         self.closed_status = surface_gripper.GripperStatus.Closed
@@ -662,36 +678,96 @@ class NativePanelContact:
     def _release_fallback(self):
         if getattr(self, '_fallback_joint', None) is not None:
             body = getattr(self, '_fallback_body', None)
-            if body is not None:
-                if getattr(self, '_defer_tool_collision', False):
-                    # sim-collect-retreat-fault-v1: re-enable the CARTON colliders only (so the placed carton
-                    # still rests/contacts the deck), and DEFER the tool-side gripper colliders -- they stay
-                    # OFF through the empty retreat (where re-enabling them re-establishes the collision-OFF-
-                    # retreat-invisible tool-vs-arm/cart contact that pins the arm), and are restored on the
-                    # next grasp close (command(True)), gripper then clear of the cart in free space.
-                    self._set_carton_collision(body, True, groups='carton')
-                    self._tool_collision_deferred = True
-                    print('SIM_ATTACH_FALLBACK tool-side collision DEFERRED past the empty retreat '
-                          '(restored on next grasp close)', flush=True)
-                else:
-                    self._set_carton_collision(body, True)   # restore for the cart drop
-            self.stage.RemovePrim(self._fallback_joint)
-            # fm379 mitigation 3: SIM-ONLY opt-in -- for a proof run, keep the released carton KINEMATIC
-            # at the release pose instead of letting it become a FREE DYNAMIC body. This avoids adding a
-            # new dynamic body to PhysX / the RTX acceleration structure at release (the hypothesised
-            # +2.68 GB rebuild trigger). The carton stays visually placed; it does not settle physically.
-            # Unset => the carton is free dynamic exactly as before (byte-identical).
-            if body is not None and os.environ.get('RESTOCK_RELEASE_KINEMATIC'):
-                from pxr import UsdPhysics
-                prim = self.stage.GetPrimAtPath(body)
-                if prim and prim.IsValid():
-                    rb = (UsdPhysics.RigidBodyAPI(prim) if prim.HasAPI(UsdPhysics.RigidBodyAPI)
-                          else UsdPhysics.RigidBodyAPI.Apply(prim))
-                    rb.CreateKinematicEnabledAttr(True)
-                    print('SIM_ATTACH_FALLBACK release KINEMATIC body=%s (proof-run, no dynamic add)'
-                          % body, flush=True)
-            print('SIM_ATTACH_FALLBACK release body=%s' % body, flush=True)
+            joint_path = self._fallback_joint
+            robust = bool(getattr(self, '_release_detach_robust', False))
+            # The ORDERED release op list is the pure planner's (release_detach): robust OFF reproduces the
+            # legacy order exactly (byte-identical); robust ON inserts the explicit joint disable before the
+            # removal and the free-dynamic + velocity-zero after it. apply_release_ops dispatches each op to
+            # the adapter methods below (self is the physics-layer adapter), so a CPU recording adapter can
+            # prove the ordered release reaches the physics layer with no GPU.
+            from . import release_detach as _rd
+            ops = _rd.ordered_release_ops(
+                robust=robust, defer_tool=bool(getattr(self, '_defer_tool_collision', False)),
+                release_kinematic=bool(os.environ.get('RESTOCK_RELEASE_KINEMATIC')))
+            _rd.apply_release_ops(ops, self, body_path=body, joint_path=joint_path)
+            print('SIM_ATTACH_FALLBACK release body=%s%s'
+                  % (body, ' (robust detach)' if robust else ''), flush=True)
         self._fallback_joint = self._fallback_body = None
+
+    # --------------------------------------------------- release-op adapter (release_detach.apply_release_ops)
+    # Each method applies ONE ordered release operation to the stage; apply_release_ops dispatches them in
+    # order. Keeping them as named methods lets a fake-stage CPU test record the exact ordered sequence
+    # (sim-place-release-carton-stays-v1) without pxr/Isaac.
+    def enable_carton_collision(self, body_path):
+        # sim-collect-retreat-fault-v1: re-enable the CARTON colliders so the placed carton rests/contacts
+        # the support. With the tool-side deferral ON, re-enable ONLY the carton (groups='carton'); the
+        # tool-side colliders are restored by defer_tool_collision() being skipped and the next grasp close.
+        self._set_carton_collision(body_path, True,
+                                   groups=('carton' if getattr(self, '_defer_tool_collision', False) else 'both'))
+
+    def defer_tool_collision(self, body_path):
+        # sim-collect-retreat-fault-v1: DEFER the tool-side gripper colliders -- they stay OFF through the
+        # empty retreat (where re-enabling them re-establishes the collision-OFF-retreat-invisible tool-vs-
+        # arm/cart contact that pins the arm) and are restored on the next grasp close (command(True)).
+        self._tool_collision_deferred = True
+        print('SIM_ATTACH_FALLBACK tool-side collision DEFERRED past the empty retreat '
+              '(restored on next grasp close)', flush=True)
+
+    def restore_tool_collision(self, body_path):
+        # Legacy non-defer path: the tool-side colliders were already restored by enable_carton_collision's
+        # groups='both' enable, so there is nothing more to do here (byte-identical: no extra line).
+        return
+
+    def remove_weld_joint(self, joint_path):
+        self.stage.RemovePrim(joint_path)
+
+    def disable_weld_joint(self, joint_path):
+        # sim-place-release-carton-stays-v1: coldwin105 proved a bare RemovePrim removes the USD prim but
+        # does NOT drop the FixedJoint's PhysX constraint at runtime. Clear the jointed bodies and disable
+        # the joint FIRST so PhysX drops the constraint regardless of whether the prim removal re-syncs.
+        from pxr import UsdPhysics
+        prim = self.stage.GetPrimAtPath(joint_path)
+        if prim and prim.IsValid():
+            joint = UsdPhysics.Joint(prim)
+            joint.GetBody0Rel().SetTargets([])
+            joint.GetBody1Rel().SetTargets([])
+            joint.CreateJointEnabledAttr().Set(False)
+            print('SIM_ATTACH_FALLBACK weld joint DISABLED (body rels cleared + jointEnabled=False) before '
+                  'removal path=%s' % joint_path, flush=True)
+
+    def set_carton_kinematic(self, body_path):
+        # fm379 mitigation 3 (proof-run only, RESTOCK_RELEASE_KINEMATIC): keep the released carton KINEMATIC
+        # at the release pose instead of a free dynamic body (no new dynamic body / RTX rebuild). Never
+        # selected by the robust detach, which wants a genuinely free dynamic body.
+        from pxr import UsdPhysics
+        prim = self.stage.GetPrimAtPath(body_path)
+        if prim and prim.IsValid():
+            rb = (UsdPhysics.RigidBodyAPI(prim) if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                  else UsdPhysics.RigidBodyAPI.Apply(prim))
+            rb.CreateKinematicEnabledAttr(True)
+            print('SIM_ATTACH_FALLBACK release KINEMATIC body=%s (proof-run, no dynamic add)'
+                  % body_path, flush=True)
+
+    def clear_carton_kinematic(self, body_path):
+        # sim-place-release-carton-stays-v1 (robust): ensure the freed carton is a DYNAMIC body (clear any
+        # kinematic flag left by a prior proof-run / staging) so it settles onto the shelf under gravity.
+        from pxr import UsdPhysics
+        prim = self.stage.GetPrimAtPath(body_path)
+        if prim and prim.IsValid() and prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr().Set(False)
+
+    def zero_carton_velocity(self, body_path):
+        # sim-place-release-carton-stays-v1 (robust): zero the freed carton's residual linear + angular
+        # velocity and wake it, so no coupling/depenetration velocity carried over from the welded state
+        # launches it (the coldwin105 149 mm rise); it then simply settles onto the shelf.
+        from pxr import Gf, UsdPhysics
+        prim = self.stage.GetPrimAtPath(body_path)
+        if prim and prim.IsValid() and prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            rb = UsdPhysics.RigidBodyAPI(prim)
+            rb.CreateVelocityAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+            rb.CreateAngularVelocityAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+            print('SIM_ATTACH_FALLBACK freed carton velocity zeroed body=%s (robust detach)'
+                  % body_path, flush=True)
 
     def read(self):
         # PURE OBSERVER of the installed plugin's latch (the plugin manages the PhysX joint
