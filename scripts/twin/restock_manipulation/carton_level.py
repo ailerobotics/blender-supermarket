@@ -850,6 +850,30 @@ class LevelConfig:
     pad_down_reorient_waypoints: int = 12
     pad_down_reorient_speed: float = 0.04
     pad_down_reorient_accel: float = 0.08
+    # sim-place-housing-compatible-seat-v1: make the pad-down collect set-down compatible with the
+    # side-grip suction HOUSING. PR 383 proved the housing (suction_cups / surface_plate_* /
+    # cube_without_surface_plates) sits on the carton +y (gripped) face, extends ~0.28 m beyond it and
+    # hangs ~0.14 m BELOW the carton bottom, so when the carton descends onto the Rollwagen upper shelf
+    # the housing strikes the shelf board edge while the carton is still ~0.10 m above the seat. Two
+    # opt-in seat corrections the pad-down branch selector + the place descent both read (both 0 => the
+    # seat is untouched => byte-identical):
+    #   * ``housing_seat_z_lift_m`` -- RAISE the descent/selector seat z by this. PR 383 named the recorded
+    #     descent over-driving toward the author_cart BOX-MODEL shelf top (0.9325 world) while the run pins
+    #     the COMPOSED flat top (0.9639 world) in three places; the gap is +0.0314 m, so a lift of that
+    #     makes the descent target the pinned/composed flat top the pins carry (the pins and the descent
+    #     agree). Raising the carton bottom one shelf-flat-top gap also stops the up-and-over that swings
+    #     the housing deeper into the board.
+    #   * ``housing_seat_lip_overhang_m`` -- SHIFT the descent/selector seat toward the +x shelf lip (the
+    #     cart mouth, ``place_reorient.mouth_out_unit``) by this, so the gripper housing hangs OUTBOARD of
+    #     the shelf board into the open mouth space. CPU-measured against the composed cw100 cart
+    #     (scripts/check_housing_seat_descent.py): the housing clears the shelf board only once the carton
+    #     is pushed far enough that its CoM leaves the shelf +x edge (a top-down grip -- out of scope, it
+    #     changes the pick + transfer -- is the real fix), so this is the bounded knob the run worker sweeps
+    #     and the proof reports the housing-clearance-vs-CoM tradeoff honestly.
+    # Requires ``place_pad_down_arrival`` (it only transforms the three-stage pad-down seat).
+    place_housing_seat: bool = False
+    housing_seat_lip_overhang_m: float = 0.0
+    housing_seat_z_lift_m: float = 0.0
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -980,6 +1004,15 @@ class LevelConfig:
         if self.place_pad_down_arrival and not self.level_place:
             raise ValueError('carton_level.place_pad_down_arrival requires level_place to be on '
                              '(the three-stage set-down keeps the carton level throughout)')
+        # sim-place-housing-compatible-seat-v1
+        for nm, v in (('housing_seat_lip_overhang_m', self.housing_seat_lip_overhang_m),
+                      ('housing_seat_z_lift_m', self.housing_seat_z_lift_m)):
+            if not (math.isfinite(float(v)) and float(v) >= 0):
+                raise ValueError(f'carton_level.{nm} must be a finite non-negative number of metres')
+        if self.place_housing_seat and not self.place_pad_down_arrival:
+            raise ValueError('carton_level.place_housing_seat requires place_pad_down_arrival to be on '
+                             '(it transforms the three-stage pad-down place seat the branch selector and '
+                             'the descent read; there is no other seat for it to correct)')
         # sim-preplace-level-gate-v1
         if not (math.isfinite(self.preplace_gate_bound_deg)
                 and 0 < self.preplace_gate_bound_deg <= self.bound_deg):
@@ -1063,7 +1096,8 @@ def resolve_level_config(spec):
                  'preplace_approach_speed', 'preplace_approach_accel', 'preplace_max_wrist_step_rad',
                  'preplace_soft_effort_nm', 'preplace_branch_select_budget_s',
                  'pad_down_arrival_shift_m', 'pad_down_arrival_height_m',
-                 'pad_down_reorient_speed', 'pad_down_reorient_accel'):
+                 'pad_down_reorient_speed', 'pad_down_reorient_accel',
+                 'housing_seat_lip_overhang_m', 'housing_seat_z_lift_m'):
         if fnum in spec and spec[fnum] is not None:
             kw[fnum] = float(spec[fnum])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
@@ -1073,7 +1107,8 @@ def resolve_level_config(spec):
                  'preplace_seeded_interior', 'preplace_branch_prefer_carry_connected',
                  'preplace_descent_feasible',
                  'place_release_on_contact', 'release_cancel_handshake', 'release_reissue',
-                 'release_free_check', 'place_seat_gate', 'place_pad_down_arrival'):
+                 'release_free_check', 'place_seat_gate', 'place_pad_down_arrival',
+                 'place_housing_seat'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     # sim-place-release-on-contact-v1 / sim-place-release-cancel-handshake-v1 / sim-release-open-reissue-v1

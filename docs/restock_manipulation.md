@@ -664,6 +664,41 @@ Recommended ON values (coldwin101): `docs/examples/pad-down-descent-jam-fragment
 `scripts/twin/tests/test_place_contact_logger.py`, `scripts/twin/tests/test_place_cage_wiring.py`; write-up:
 `data/sim-pad-down-descent-jam-physics-v1/report.md`.
 
+#### A housing-compatible shelf-lip seat (sim-place-housing-compatible-seat-v1)
+
+The side-grip housing hangs **~0.14 m below** the carton bottom on the carton **+y (gripped) face** and
+extends ~0.28 m beyond it, so wherever the carton sits on the shelf the housing occupies the volume
+below-and-beside it and strikes the shelf board. Two opt-in corrections, applied by
+`TransferController._housing_seat_tcp` to the seat BOTH the pad-down branch selector
+(`_issue_pad_down_reorient`) AND the place descent read (so they agree), in the `carton_level` HOST block
+(requires `place_pad_down_arrival`); default off ⇒ byte-identical:
+
+- **`housing_seat_z_lift_m`** — the seat-target source fix. The recorded descent **over-drove toward the
+  `author_cart` box-model shelf top (0.9325)** (the live bridge resolves the settled support into
+  `poses['place']`) while the run pins the **composed flat top (0.9639)**. A lift of the gap
+  (**0.9639 − 0.9325 = 0.0314 m**) makes the descent land the carton on the pinned flat top — the pins and
+  the descent agree (CPU-proven: with the lift the carton bottom lands 0.9639; without it, 0.9325).
+- **`housing_seat_lip_overhang_m`** — shift the seat toward the **+x shelf lip** (the open cart mouth,
+  `place_reorient.mouth_out_unit`) so the housing hangs **outboard** of the board. The housing-vs-shelf
+  clearance rises with the overhang while the carton CoM approaches the lip (the only binding edge; the cage
+  stays ≥ +150 mm, the deck ≥ +210 mm). At **0.28 m** the housing clears the board **+36 mm** (≥ the 30 mm
+  design margin) with the carton CoM **14 mm inboard** of the lip (a stable rest, 47 % of the base
+  supported). The window is narrow and edge-weighted (clearance trades ~1:1 against the CoM margin); **0.26 m**
+  (housing +16 mm — no strike, below the 30 mm margin — CoM 34 mm inboard, 53 % support) is the more
+  tow-stable alternative.
+
+A straight *vertical* descent clears no better than the L-path (both −57 mm at the nominal seat — the
+production pad-down reachable yaw ~−105° is fixed, so the path shape and the carton yaw are NOT the lever;
+the overhang is). A **top-down grip** (out of scope — it changes the pick + transfer) is the follow-up for a
+centred, robustly-stable, wide-margin rest.
+
+Recommended ON values (coldwin102): `docs/examples/housing-seat-fragment.json`
+(`place_housing_seat: true`, `housing_seat_z_lift_m: 0.0314`, `housing_seat_lip_overhang_m: 0.28`, with the
+PR 383 `place_descent_cage_gate` `include_support: true` already wired). Boot armed log:
+`PLACE_HOUSING_SEAT armed …`. CPU proof: `scripts/check_housing_seat_descent.py`,
+`scripts/twin/tests/test_place_housing_seat.py`; write-up:
+`data/sim-place-housing-compatible-seat-v1/report.md`.
+
 #### The seat gate is the single release authority, incl. the pad-down descent (sim-seat-gate-pad-down-path-v1)
 
 coldwin98 ran the three-stage set-down cleanly, then released the weld **in mid-air 106 mm above the seat**

@@ -1,0 +1,38 @@
+{
+  "_comment": "sim-place-housing-compatible-seat-v1 (coldwin102). The opt-in side-grip-HOUSING-compatible collect pad-down SEAT: a mouth-out lip overhang + a z-lift to the pinned composed shelf flat top, so the gripper suction HOUSING clears the Rollwagen upper-shelf board instead of striking it (PR 383). ON values below are for coldwin102. Default off (both values 0 / place_housing_seat absent) => byte-identical with coldwin100/101.",
+
+  "_the_problem": "PR 383 named the coldwin98-100 pad-down set-down jam: the gripper suction housing (suction_cups / surface_plate_1..6 / cube_without_surface_plates) STRIKES /Rollwagen/chassis/shelf while the welded carton is still ~0.10 m above the seat. CPU-measured in the CARTON frame, the housing hangs ~143 mm BELOW the carton bottom on the carton +y (gripped) face and extends ~278 mm beyond it, so wherever the carton sits on the shelf the housing occupies the volume below-and-beside it. A straight VERTICAL descent clears no better than the recorded L-path (both -57 mm at the nominal seat), and the reachable pad-down carton yaw is fixed at ~-105deg, so neither the descent path shape nor the carton yaw is the lever -- the MOUTH-OUT overhang is.",
+
+  "_the_two_corrections": "(1) housing_seat_z_lift_m: the recorded descent over-drove toward the author_cart BOX-MODEL shelf top (0.9325 world, the value the live bridge resolves into poses['place']) while the run PINS the COMPOSED flat top (0.9639) in three places (scenario cart_support_z_world, runtime cart_placement.support_z_world, orchestrate --support-top-z-world). A lift of the gap (0.9639-0.9325=0.0314 m) makes the pad-down branch selector AND the place descent target the pinned flat top -- the pins and the descent agree. (2) housing_seat_lip_overhang_m: shift the seat toward the +x shelf lip (the open cart mouth, place_reorient.mouth_out_unit) so the housing hangs OUTBOARD of the board. Both are applied by controller._housing_seat_tcp to the SAME seat both the selector and the descent read; requires place_pad_down_arrival; default 0 => byte-identical.",
+
+  "_cpu_finding": "data/sim-place-housing-compatible-seat-v1 (scripts/check_housing_seat_descent.py, composed cw100 mission.usda, PR 383 shelf-inclusive arm-sphere sweep). The housing-vs-shelf clearance rises monotonically with the overhang while the carton CoM approaches the +x lip (the only binding edge; cage >= +150 mm, deck >= +210 mm throughout, tilt << 2.0deg). Tradeoff: overhang 0.26 -> housing +16 mm (no strike), CoM 34 mm inboard, 53% base; overhang 0.28 -> housing +36 mm (>= 30 mm design margin), CoM 14 mm inboard, 47% base; overhang 0.30 -> housing +54 mm but CoM 9 mm PAST the lip (would tip). The window is narrow + edge-weighted (clearance trades ~1:1 against the CoM margin). A STABLE (CoM on the shelf) AND housing-CLEAR (>= 30 mm) seat EXISTS at 0.28.",
+
+  "carton_level": {
+    "_existing": "Keep the coldwin100/101 pad-down keys: place_pad_down_arrival:true + its deps (place_from_above:true, level_place:true), pad_down_arrival_shift_m/height_m, the seat/release keys (place_seat_gate, place_release_on_contact, closed_loop_*, gravity_compensation, ...). The housing-seat transform only moves the seat the pad-down selector + descent read.",
+
+    "place_housing_seat": true,
+    "_place_housing_seat_note": "THE SWITCH. Apply the housing-compatible seat transform (mouth-out overhang + z-lift) to the pad-down place seat. Requires place_pad_down_arrival (it has no other seat to correct; validate + the boot wiring both refuse a half-wired config loudly). Default off => byte-identical.",
+
+    "housing_seat_z_lift_m": 0.0314,
+    "_z_lift_note": "composed flat top 0.9639 - box-model/settled top 0.9325 = 0.0314 m. Raises the descent/selector seat so the carton lands on the PINNED composed flat top, not 31 mm below it. CPU-proven: with the lift the carton bottom lands 0.9639; without it, 0.9325.",
+
+    "housing_seat_lip_overhang_m": 0.28,
+    "_overhang_note": "the smallest mouth-out overhang (toward the +x shelf lip) that reaches the >= 30 mm housing-vs-shelf margin (+36 mm) WHILE the carton CoM stays on the shelf (14 mm inboard of the lip, 47% base support -- a stable static rest the seat gate accepts). If a GPU run shows the carton shifting during the couple->outbound TOW, drop to 0.26 (housing +16 mm -- no strike, below the 30 mm margin -- CoM 34 mm inboard, 53% support, a safer rest)."
+  },
+
+  "place_descent_cage_gate": {
+    "_note": "UNCHANGED from coldwin101 -- the SAME wired descent cage gate block, with include_support:true (PR 383) so the shelf-inclusive sweep is live and the housing-vs-shelf strike is refused BY NAME if the seat is mis-set. A cart_pose is required; keep the pre-baked collider_boxes.",
+    "cart_pose": "[keep the coldwin101 4x4 cart-body -> ur_base_link]",
+    "include_support": true,
+    "margin": 0.03,
+    "collider_boxes": "[keep the coldwin101 pre-baked cart-frame AABBs]"
+  },
+
+  "_expected_log": "At boot: 'PLACE_HOUSING_SEAT armed lip_overhang=0.2800 z_lift=0.0314 -- the pad-down branch selector AND the place descent now target a side-grip-housing-compatible seat ...'. At the place: 'PLACE_HOUSING_SEAT phase=place overhang=0.2800 z_lift=0.0314 -> seat (...) -> (...)', then 'PLACE_REORIENT ... chosen pad-down ...' and the place descent landing the carton on the 0.9639 flat top with the housing clear of /Rollwagen/chassis/shelf (NO 'PLACE_DESCENT_CAGE_CLEARANCE prim=shelf' refusal, NO blind jam).",
+
+  "_cpu_proof": "PYTHONPATH=scripts <usd-core-python> scripts/check_housing_seat_descent.py (exit 0: the z-lift targets the composed flat top; overhang 0.28 clears the shelf >= 30 mm with the CoM on the shelf; a stable+clear seat exists). Unit + boot-path + selector-integration tests: scripts/twin/tests/test_place_housing_seat.py.",
+
+  "_bounded_gpu_proof": "Re-run the coldwin101 config with this carton_level block (place_housing_seat:true + the z-lift/overhang; place_descent_cage_gate include_support already wired) through scripts/run_mobile_restock.py under /tmp/aile-gpu.lock (HEAVY_MB=2500 for whispr). Watch: the carton seats on the shelf with the housing clear (no shelf strike, no PLACE_DESCENT_CAGE_CLEARANCE prim=shelf), and whether the edge-weighted rest (CoM 14 mm inboard, 47% base) holds through the subsequent tow -- if not, drop the overhang to 0.26. A top-down grip (changes the pick + transfer) is the follow-up for a centred, robustly-stable rest.",
+
+  "_scope": "Only the COLLECT pad-down place SEAT (the geometry the descent/selector target). The release logic (PR 382's seat gate stays the single release authority), the transfer stage (PR 381), the pick, any watchdog/budget change, and the PR 380 three-stage approach (except the seat it uses) are out of scope. Every switch is opt-in and default-off => a run without the keys is byte-identical."
+}
