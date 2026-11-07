@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -35,6 +36,29 @@ import numpy as np
 from twin.urdf_probe import parse_urdf, link_world_transforms
 
 BASE_FRAME = 'ur_base_link'
+
+
+# sim-place-descent-reach-cage-v1 perf: the cage-aware pre-place branch selector evaluates a place-descent
+# cage sweep PER CANDIDATE, and arm_spheres_world() re-parsed the URDF and reloaded the XRDF sphere model on
+# EVERY waypoint call -- re-parsing a static mobile.urdf 100+ times per select pushed the carry-connected
+# standoff search past its 20 s budget (coldwin91 PREPLACE_REACTION_BRANCH_REFUSED at 21.4 s). These two
+# loads are pure reads of static files during a run; memoize them keyed by (path, mtime) so a mid-run
+# regeneration (a bench rewriting the URDF/XRDF) still invalidates, while the hot path parses once.
+@lru_cache(maxsize=16)
+def _parse_urdf_cached(urdf_path: str, _mtime: float):
+    return parse_urdf(str(urdf_path))
+
+
+@lru_cache(maxsize=16)
+def _load_collision_spheres_cached(xrdf_path: str, _mtime: float):
+    return _load_collision_spheres_uncached(xrdf_path)
+
+
+def _mtime_or_zero(path: str) -> float:
+    try:
+        return Path(path).stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 @dataclass(frozen=True)
@@ -70,7 +94,13 @@ class Box:
 
 
 def load_collision_spheres(xrdf_path: str) -> Dict[str, List[dict]]:
-    """The ``collision`` geometry sphere model keyed by link, as cuMotion loads it for world checks."""
+    """The ``collision`` geometry sphere model keyed by link, as cuMotion loads it for world checks.
+
+    Memoized by (path, mtime): the hot cage-sweep path reloads the same static XRDF per waypoint."""
+    return _load_collision_spheres_cached(str(xrdf_path), _mtime_or_zero(str(xrdf_path)))
+
+
+def _load_collision_spheres_uncached(xrdf_path: str) -> Dict[str, List[dict]]:
     import yaml
     xrdf = yaml.safe_load(Path(xrdf_path).read_text())
     name = xrdf.get('collision', {}).get('geometry')
@@ -83,7 +113,7 @@ def load_collision_spheres(xrdf_path: str) -> Dict[str, List[dict]]:
 def model_link_transforms(urdf_path: str, config: Dict[str, float]) -> Dict[str, np.ndarray]:
     """Link transforms in the ur_base_link frame for exactly the links in curobo's kinematic
     model (the arm chain rooted at ur_base_link); the fixed base below the root is excluded."""
-    robot = parse_urdf(str(urdf_path))
+    robot = _parse_urdf_cached(str(urdf_path), _mtime_or_zero(str(urdf_path)))
     return link_world_transforms(robot, config or {}, root=BASE_FRAME)
 
 

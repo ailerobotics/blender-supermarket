@@ -1456,7 +1456,7 @@
     "preplace_reaction_branch": true,
     "preplace_max_wrist_step_rad": 0.15,
     "preplace_soft_effort_nm": 56.0,
-    "preplace_branch_select_budget_s": 20.0,
+    "preplace_branch_select_budget_s": 45.0,
     "preplace_seeded_interior": true,
     "preplace_branch_prefer_carry_connected": true,
     "preplace_descent_feasible": true,
