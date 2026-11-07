@@ -16,7 +16,9 @@ from twin.restock_manipulation import place_clearance as pc
 
 # --------------------------------------------------------------------------- pure reject / selection logic
 def test_descent_reject_none_when_all_clear():
-    per_body = {'side_1_horizontal_6': 0.10, 'post_2': 0.08, 'deck': -0.2, 'shelf': -0.2}
+    # sim-pad-down-descent-jam-physics-v1: the support board (deck/shelf) is now SWEPT too (the pad-down
+    # gripper housing must clear it), so "all clear" means the cage AND the support board are clear.
+    per_body = {'side_1_horizontal_6': 0.10, 'post_2': 0.08, 'deck': 0.20, 'shelf': 0.05}
     assert pc.place_descent_sweep_reject(per_body) is None
 
 
@@ -30,9 +32,24 @@ def test_descent_reject_names_worst_penetrating_cage_body():
     assert 'cube_without_surface_plates' in msg            # the named wedge link
 
 
-def test_descent_reject_excludes_support_bodies():
-    per_body = {'deck': -0.5, 'shelf': -0.5, 'side_1_horizontal_6': 0.1}
+def test_descent_reject_names_support_board_penetration():
+    # sim-pad-down-descent-jam-physics-v1: a gripper-housing PENETRATION of the support board (the
+    # coldwin100 jam -- the pad-down housing hangs below the carton and strikes the shelf) is now refused
+    # BY NAME at the penetration-only support margin, which the cage-only sweep was blind to.
+    per_body = {'deck': 0.20, 'shelf': -0.436, 'side_1_horizontal_6': 0.1}
+    msg = pc.place_descent_sweep_reject(per_body)
+    assert msg is not None
+    assert 'prim=shelf' in msg and 'SUPPORT board' in msg
+
+
+def test_descent_reject_support_board_close_ride_passes():
+    # The pad-down gripper housing legitimately rides CLOSE to the support board as it lowers the carton
+    # (a clean straight descent holds ~+17 mm). The support board is checked at a penetration-only margin,
+    # so a close-but-clear ride passes while the cage keeps the full 30 mm design margin.
+    per_body = {'shelf': 0.017, 'deck': 0.20, 'side_1_horizontal_6': 0.1}
     assert pc.place_descent_sweep_reject(per_body) is None
+    # ...but a sub-cage-margin CAGE clearance still refuses (the support margin does not relax the cage).
+    assert pc.place_descent_sweep_reject({'shelf': 0.017, 'side_1_horizontal_6': 0.02}) is not None
 
 
 def test_descent_default_margin_is_30mm_design():

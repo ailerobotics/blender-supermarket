@@ -544,6 +544,33 @@ def cage_body_names(bodies):
     return [n for n in bodies if is_cage_body(n)]
 
 
+def place_descent_sweep_bodies(bodies, *, support=SUPPORT_BODIES):
+    """The cart bodies a SHELF-AWARE collect place-DESCENT arm-sphere sweep checks: the CAGE bodies
+    (:func:`cage_body_names`) PLUS the present SUPPORT bodies (deck/shelf) -- sim-pad-down-descent-jam-physics-v1.
+
+    The descent gate historically swept only the cage (``cage_body_names``) and EXCLUDED the support
+    surfaces, on the assumption that only the CARTON reaches the support. coldwin98-100 disproved that:
+    in the PAD-DOWN side-grip place the welded CARTON is cage-filtered, but the unfiltered gripper suction
+    HOUSING (``suction_cups`` / ``surface_plate_*`` / ``cube_without_surface_plates``) hangs ~0.14 m BELOW
+    the carton bottom, so it reaches the upper-shelf board and strikes it while the carton is still ~0.10 m
+    above the seat (CPU-replayed on the coldwin100 ``TRAJ_HOST_PLAN`` vs the COMPOSED USD colliders -- not
+    the box model: the housing penetrates ``/Rollwagen/chassis/shelf`` by ~52 mm from the first descent
+    waypoint, while every CAGE body stays >= +0.11 m clear -- the jam the cage-only sweep was structurally
+    blind to; see ``scripts/check_pad_down_shelf_contact.py``). So a shelf-aware descent sweep must include
+    the support board: the gripper housing is NOT the carton and must clear the surface the carton lands on.
+    The CARTON is never in this sphere sweep, so including the support does not penalise the carton resting
+    on it (:func:`place_descent_sweep_reject` checks the support board at a penetration-only margin because
+    the pad-down housing legitimately rides close to it). Deck is included too -- harmless (far) for a shelf
+    place, correct for a deck place. Preserves the cage order, then appends the present support bodies.
+
+    This is OPT-IN: the descent providers default ``include`` to the CAGE-ONLY set (byte-identical); a
+    boot/integration layer passes this set (via ``place_descent_cage_gate`` ``include_support`` or an
+    explicit ``include``) to arm the shelf check."""
+    cage = cage_body_names(bodies)
+    sup = [n for n in support if n in bodies and n not in cage]
+    return cage + sup
+
+
 def preplace_cage_clearance_provider(urdf_path, xrdf_path, cart_pose, *, bodies=None,
                                      margin=DEFAULT_PREPLACE_CAGE_MARGIN_M, include=None, cal_offset_m=0.0):
     """Build the ``callable(waypoints) -> reject|None`` the controller injects as its preplace cage-clearance
@@ -615,29 +642,66 @@ def place_descent_cage_clearance(configs, urdf_path, xrdf_path, bodies, T_base_c
     return preplace_cage_arm_clearance(configs, urdf_path, xrdf_path, bodies, T_base_cart, include=include)
 
 
+# Default refuse margin (m) for the SUPPORT board (deck/shelf) in a shelf-aware place-descent sweep:
+# penetration-only (sim-pad-down-descent-jam-physics-v1). Unlike a CAGE upright/bar -- which the gripper
+# housing must clear by the full design margin (nothing legitimately rides there) -- the pad-down gripper
+# housing legitimately rides CLOSE to the support board as it lowers the carton onto it (the carton bottom
+# lands on the board, the housing skims past its edge). coldwin100 replay: a clean straight descent holds
+# the housing ~+9-17 mm from the shelf board (within the conservative XRDF-sphere model) while the carton
+# lands; the jamming descent drove it -52 mm INTO the board. So a true PENETRATION of the support board is
+# the jam to refuse; a close ride is not. The cage keeps the full 30 mm design margin.
+DEFAULT_PLACE_DESCENT_SUPPORT_MARGIN_M = 0.0
+
+
 def place_descent_sweep_reject(per_body_min, *, margin=DEFAULT_PLACE_DESCENT_CAGE_MARGIN_M,
-                               support=SUPPORT_BODIES):
-    """The :data:`PLACE_DESCENT_CAGE_CLEARANCE` refuse message when any NON-support cart body's minimum
-    arm-sphere clearance over the place-descent sweep is below ``margin``, else ``None``. ``support`` bodies
-    (deck/shelf -- the surface the carton lands on) are excluded. Names the worst prim + its min_clearance so
-    the lane sees exactly which cage body the descent would strike and by how much."""
+                               support=SUPPORT_BODIES, support_margin=DEFAULT_PLACE_DESCENT_SUPPORT_MARGIN_M):
+    """The :data:`PLACE_DESCENT_CAGE_CLEARANCE` refuse message when the place-descent arm-sphere sweep would
+    drive a gripper link into a Rollwagen cart body, else ``None``.
+
+    Two margins, because the gripper housing must clear two kinds of body with different tolerances
+    (sim-pad-down-descent-jam-physics-v1):
+
+      * a CAGE body (post / side / back bar) below ``margin`` (the 30 mm design margin) -- nothing
+        legitimately rides there (coldwin87's ``cube_without_surface_plates`` wedge on the +x mouth side
+        bar), OR
+      * a SUPPORT body (deck/shelf, ``support``) below ``support_margin`` (penetration-only by default) --
+        the PAD-DOWN gripper housing hangs ~0.14 m below the carton bottom and legitimately rides close to
+        the board the carton lands on, so only a true PENETRATION is the jam (coldwin98-100: the suction
+        housing drove -52 mm into ``/Rollwagen/chassis/shelf`` while the carton stayed ~0.10 m above the
+        seat -- the cage-only sweep was blind to it; a clean straight descent holds +9-17 mm and passes).
+
+    Backward-compatible: when ``per_body_min`` contains only CAGE bodies (a cage-only sweep, ``include`` not
+    covering the support board) the support branch is never exercised, so the verdict is unchanged. Names
+    the worst offending prim + its clearance first so the lane sees exactly which cart body the descent
+    would strike and by how much."""
     support = set(support)
-    bad = sorted((v, k) for k, v in per_body_min.items() if k not in support and v < margin)
+    bad = []
+    for k, v in per_body_min.items():
+        thr = support_margin if k in support else margin
+        if v < thr:
+            bad.append((v, k))
+    bad.sort()
     if not bad:
         return None
     worst_v, worst_k = bad[0]
+    worst_is_support = worst_k in support
     named = ', '.join('%s=%.1fmm' % (k, v * 1000.0) for v, k in bad)
-    return ('%s prim=%s min_clearance=%.1fmm (margin %.0f mm; cage bodies below it: %s) -- the collect '
-            'place-descent would drive a gripper link into a Rollwagen cage body (coldwin87 wedged the '
-            'suction housing cube_without_surface_plates on the +x mouth side bar at the standoff carry-wrist '
-            'orientation, freezing wrist_2 at a 1.30 rad TRAJ_HOST_TRACK_MISS -> PATH_TOLERANCE_VIOLATED '
-            'abort). Refusing before motion.'
-            % (PLACE_DESCENT_CAGE_CLEARANCE, worst_k, worst_v * 1000.0, margin * 1000.0, named))
+    cause = (('the pad-down gripper housing (suction_cups / surface_plate_* / cube_without_surface_plates), '
+              'which hangs ~0.14 m below the carton bottom, would strike the SUPPORT board the carton lands '
+              'on (coldwin100: -52 mm into /Rollwagen/chassis/shelf while the carton stayed ~0.10 m above '
+              'the seat -- the jam the cage-only sweep could not see)') if worst_is_support else
+             ('the collect place-descent would drive a gripper link into a Rollwagen cage body (coldwin87 '
+              'wedged the suction housing cube_without_surface_plates on the +x mouth side bar, freezing '
+              'wrist_2 at a 1.30 rad TRAJ_HOST_TRACK_MISS -> PATH_TOLERANCE_VIOLATED abort)'))
+    return ('%s prim=%s min_clearance=%.1fmm (cage margin %.0f mm / support margin %.0f mm; bodies below: '
+            '%s) -- %s. Refusing before motion.'
+            % (PLACE_DESCENT_CAGE_CLEARANCE, worst_k, worst_v * 1000.0, margin * 1000.0,
+               support_margin * 1000.0, named, cause))
 
 
 def place_descent_cage_clearance_provider(urdf_path, xrdf_path, cart_pose, *, bodies=None,
                                           margin=DEFAULT_PLACE_DESCENT_CAGE_MARGIN_M, include=None,
-                                          cal_offset_m=0.0):
+                                          cal_offset_m=0.0, include_support=False):
     """Build the ``callable(waypoints) -> reject|None`` the controller injects as its place-descent
     cage-clearance gate (sim-place-descent-reach-cage-v1). Opt-in: the controller leaves the hook ``None``
     (byte-identical) unless a boot/integration layer supplies this provider with the live coupled cart pose +
@@ -646,14 +710,23 @@ def place_descent_cage_clearance_provider(urdf_path, xrdf_path, cart_pose, *, bo
 
     ``cart_pose``: the cart-body -> ur_base_link pose ((x, y, z, yaw) or 4x4). ``bodies``: cart-frame AABBs
     (default :func:`rollwagen_collider_boxes`, needs usd-core). ``include``: cart-body names to check (default
-    the CAGE bodies). ``margin``: refuse threshold (m). Returns a closure that, given a list of
-    ARM_JOINTS-order waypoint configs, returns the refuse message or ``None``. The closure applies
+    the CAGE bodies; an explicit list overrides ``include_support``). ``include_support`` (sim-pad-down-
+    descent-jam-physics-v1): when True and ``include`` is None, ALSO sweep the SUPPORT board (deck/shelf) --
+    :func:`place_descent_sweep_bodies` -- so the pad-down gripper-housing-vs-shelf strike is refused by name
+    (the support board at the penetration-only support margin; the cage at the 30 mm design margin). Default
+    False => cage-only => byte-identical. ``margin``: cage refuse threshold (m). Returns a closure that, given
+    a list of ARM_JOINTS-order waypoint configs, returns the refuse message or ``None``. The closure applies
     ``cal_offset_m`` (subtracted from every clearance, a SEAL-anchored calibration knob) before the margin
     test."""
     from twin.restock_manipulation.cart_world_obstacle import cart_pose_matrix
     if bodies is None:
         bodies = rollwagen_collider_boxes()
-    keep = cage_body_names(bodies) if include is None else list(include)
+    if include is not None:
+        keep = list(include)
+    elif include_support:
+        keep = place_descent_sweep_bodies(bodies)
+    else:
+        keep = cage_body_names(bodies)
     T_base_cart = cart_pose_matrix(cart_pose)
 
     def _gate(waypoints):
@@ -670,19 +743,30 @@ def place_descent_cage_clearance_provider(urdf_path, xrdf_path, cart_pose, *, bo
 
 # ------------------------- pad-down-branch ranking clearance (sim-place-pad-down-arrival-v1)
 def place_descent_cage_min_clearance_provider(urdf_path, xrdf_path, cart_pose, *, bodies=None,
-                                              include=None, cal_offset_m=0.0, support=SUPPORT_BODIES):
+                                              include=None, cal_offset_m=0.0, support=SUPPORT_BODIES,
+                                              include_support=False):
     """Build the ``callable(waypoints) -> float`` returning the MINIMUM cuMotion-arm-sphere clearance (m)
-    to any NON-support cart cage body over a set of waypoints (sim-place-pad-down-arrival-v1). The
+    to the cart bodies the descent must clear over a set of waypoints (sim-place-pad-down-arrival-v1). The
     pad-down-branch selector (``place_reorient.select_pad_down_branch``) uses it to RANK the cage-clear
     branches by how clear their descent is -- the SAME arm-sphere sweep as
     :func:`place_descent_cage_clearance_provider`, exposing the margin instead of a pass/fail verdict.
-    Returns ``+inf`` for an empty waypoint list (no constraint). Mirrors the gate provider's arguments."""
+    Returns ``+inf`` for an empty waypoint list (no constraint). Mirrors the gate provider's arguments.
+
+    ``include_support`` (sim-pad-down-descent-jam-physics-v1): default False => the min is over NON-support
+    cage bodies only (byte-identical); True => ALSO sweep + rank by the SUPPORT board (so the selector ranks
+    branches by their true tightest clearance, the shelf the housing skims), matching the gate's
+    ``include_support``."""
     from twin.restock_manipulation.cart_world_obstacle import cart_pose_matrix
     if bodies is None:
         bodies = rollwagen_collider_boxes()
-    keep = cage_body_names(bodies) if include is None else list(include)
+    if include is not None:
+        keep = list(include)
+    elif include_support:
+        keep = place_descent_sweep_bodies(bodies)
+    else:
+        keep = cage_body_names(bodies)
     T_base_cart = cart_pose_matrix(cart_pose)
-    support_set = set(support)
+    support_set = set() if include_support else set(support)
 
     def _clear(waypoints):
         if not waypoints:

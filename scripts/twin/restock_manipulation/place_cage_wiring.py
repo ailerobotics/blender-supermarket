@@ -30,7 +30,12 @@ HOST block schema (both keys share it)::
         "collider_boxes": {                   # optional; pre-baked cart-frame AABBs for a no-pxr host
             "post_2": [[lox, loy, loz], [hix, hiy, hiz]], ...
         },
-        "cal_offset_m": 0.0                   # optional SEAL-anchored calibration knob
+        "cal_offset_m": 0.0,                  # optional SEAL-anchored calibration knob
+        "include_support": true               # optional (sim-pad-down-descent-jam-physics-v1): also sweep
+                                              #   the SUPPORT board (deck/shelf) so the pad-down gripper-
+                                              #   housing-vs-shelf strike is refused BY NAME (penetration-
+                                              #   only support margin). Default false => cage-only (byte-
+                                              #   identical with PR 376). Only valid for the descent gate.
     }
 
 ``"preplace_cage_gate"`` takes the same shape (its margin default is the penetration-only 0 mm, the PR
@@ -112,11 +117,19 @@ def build_place_descent_cage_gate(block, urdf_path, *, default_xrdf=None):
     bodies = _resolve_bodies(block)
     include = block.get('include')
     cal = float(block.get('cal_offset_m', 0.0))
+    # sim-pad-down-descent-jam-physics-v1: opt-in SHELF awareness. ``include_support`` true => the descent
+    # arm-sphere sweep ALSO covers the SUPPORT board (deck/shelf), so the pad-down gripper-housing-vs-shelf
+    # strike (coldwin98-100, the jam the cage-only sweep was blind to) is refused BY NAME at the penetration-
+    # only support margin. Default false => cage-only => byte-identical with the PR 376 gate.
+    include_support = bool(block.get('include_support', False))
     gate = pc.place_descent_cage_clearance_provider(
-        str(urdf_path), xrdf, cart_pose, bodies=bodies, margin=margin, include=include, cal_offset_m=cal)
+        str(urdf_path), xrdf, cart_pose, bodies=bodies, margin=margin, include=include, cal_offset_m=cal,
+        include_support=include_support)
     clearance = pc.place_descent_cage_min_clearance_provider(
-        str(urdf_path), xrdf, cart_pose, bodies=bodies, include=include, cal_offset_m=cal)
-    return gate, clearance, {'xrdf': xrdf, 'margin': margin, 'cart_pose': cart_pose}
+        str(urdf_path), xrdf, cart_pose, bodies=bodies, include=include, cal_offset_m=cal,
+        include_support=include_support)
+    return gate, clearance, {'xrdf': xrdf, 'margin': margin, 'cart_pose': cart_pose,
+                             'include_support': include_support}
 
 
 def wire_place_cage_gates(controller, config, urdf_path, *, default_xrdf=None, log=print):
@@ -150,11 +163,14 @@ def wire_place_cage_gates(controller, config, urdf_path, *, default_xrdf=None, l
         # (byte-identical when the three-stage set-down is off -- it is only read by the reorientation leg).
         controller._place_descent_cage_min_clearance = clearance
         armed.append(PLACE_DESCENT_CAGE_GATE_KEY)
-        log('PLACE_DESCENT_CAGE_GATE armed margin=%.3f m xrdf=%s cart_pose=%s -- the carry-connected '
-            'standoff selector now discards a cage-raking descent branch AND the place-descent dispatch '
-            'refuses an intersecting set-down BY NAME before motion (PR 376 provider, previously never '
-            'constructed -- coldwin90 repeated run 89/90 exactly without it)'
-            % (meta['margin'], meta['xrdf'], list(meta['cart_pose'])
-               if not isinstance(meta['cart_pose'], (int, float)) else meta['cart_pose']), flush=True)
+        log('PLACE_DESCENT_CAGE_GATE armed margin=%.3f m include_support=%s xrdf=%s cart_pose=%s -- the '
+            'carry-connected standoff selector now discards a cage-raking descent branch AND the place-descent '
+            'dispatch refuses an intersecting set-down BY NAME before motion (PR 376 provider, previously '
+            'never constructed -- coldwin90 repeated run 89/90 exactly without it)%s'
+            % (meta['margin'], meta.get('include_support', False), meta['xrdf'], list(meta['cart_pose'])
+               if not isinstance(meta['cart_pose'], (int, float)) else meta['cart_pose'],
+               ' + the SUPPORT board (deck/shelf) so the pad-down gripper-housing-vs-shelf jam '
+               '(sim-pad-down-descent-jam-physics-v1, coldwin98-100) is now refused by name at the '
+               'penetration-only support margin' if meta.get('include_support') else ''), flush=True)
 
     return armed
