@@ -703,9 +703,15 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # 0 mm contact, suction on, status stuck Closing, gripped_n 0). Raise it for the sim so the seal
     # survives the over-press transient and still holds the 0.45 kg carton through lift/tow. Default 30
     # keeps the conservative real-ish value; the real rig never runs this native authoring.
+    # sim-place-release-residual-bind-v1: when the residual-bind fix is on (RUNTIME release_residual_bind),
+    # de-instance the surface_plate/cube panel colliders here (pre-reset) so the carry-disable + release
+    # deferral cover them -- otherwise they stay LIVE instance proxies that drag the pressed carton on the
+    # clearance lift (coldwin106). Default off => byte-identical.
+    from twin.restock_manipulation import release_residual_bind as _rrb_cfg
     author_native_gripper(stage,tool=tool,tool0_path=paths['ur_tool0'],
         body_path=paths['suction_cups'],gripper_path='/RestockPanelGripper',
-        force_limit=float(config.get('gripper_force_limit', 30.)))
+        force_limit=float(config.get('gripper_force_limit', 30.)),
+        deinstance_tool_colliders=_rrb_cfg.residual_bind_clear_enabled(config))
     cart_path=composition['assets']['cart']['body']
     cart_root=composition['assets']['cart']['root']
     solver=configure_cart_solver(stage,cart_root)

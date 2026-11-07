@@ -77,13 +77,24 @@ class ReleaseFreeGate:
 
     def __init__(self, *, settle_ticks: int = 5, stable_eps_m: float = 0.005, rest_gap_m: float = 0.03,
                  settle_window_ticks: int = 60, lift_dz_m: float = 0.06, follow_frac: float = 0.5,
-                 coupled_abort_m: Optional[float] = None):
+                 coupled_abort_m: Optional[float] = None, positive_free: bool = False,
+                 settle_drop_min_m: float = 0.003):
         self.settle_ticks = max(1, int(settle_ticks))
         self.stable_eps_m = float(stable_eps_m)
         self.rest_gap_m = float(rest_gap_m)
         self.settle_window_ticks = max(self.settle_ticks, int(settle_window_ticks))
         self.lift_dz_m = float(lift_dz_m)
         self.follow_frac = float(follow_frac)
+        # sim-place-release-residual-bind-v1 (opt-in; default off => byte-identical, settle() owns the hold):
+        # the POSITIVE proof of freedom that a BOUND carton cannot satisfy. The legacy settle() passes on
+        # "carton z stable + |bottom_gap| small for N ticks" -- but a carton the detach did not actually free
+        # is held RIGID at seat height by the surviving weld, so it reads stable AND resting and the legacy
+        # gate falsely passes (coldwin106). free_proof requires instead EITHER a reported carton-vs-support
+        # CONTACT pair (a welded carton held off the deck reports none) OR a measured SETTLE (a drop of at
+        # least settle_drop_min_m onto the support, then rest -- a held carton cannot drop); neither within
+        # the window => RELEASE_NOT_FREE kind=no-support-contact, WITHOUT the destructive lift.
+        self.positive_free = bool(positive_free)
+        self.settle_drop_min_m = float(settle_drop_min_m)
         # sim-place-release-carton-stays-v1 (opt-in; None => off => byte-identical): the PER-TICK coupled-rise
         # abort threshold. The follow() verdict at lift COMPLETION caught coldwin105's persistent weld only
         # after the carton had risen 0.1494 m with the gripper (then the arm lost its heartbeat on the
@@ -102,6 +113,8 @@ class ReleaseFreeGate:
         if self.coupled_abort_m is not None and not (math.isfinite(self.coupled_abort_m)
                                                      and self.coupled_abort_m > 0):
             raise ValueError('release_free_coupled_abort_m must be a finite positive number of metres or None')
+        if not (math.isfinite(self.settle_drop_min_m) and self.settle_drop_min_m > 0):
+            raise ValueError('release_free_settle_drop_min_m must be a finite positive number of metres')
         self.reset()
 
     def reset(self) -> None:
@@ -110,6 +123,10 @@ class ReleaseFreeGate:
         self._stable = 0
         self._prev_z: Optional[float] = None
         self.lift_baseline: Optional[float] = None
+        # sim-place-release-residual-bind-v1 positive-free latches
+        self._release_baseline: Optional[float] = None   # carton centre z at the detach (the release height)
+        self._min_z: Optional[float] = None              # lowest carton z seen since the detach (the drop depth)
+        self._dropped: bool = False                      # a >= settle_drop_min_m drop has been observed
 
     @staticmethod
     def _finite(v) -> Optional[float]:
@@ -150,6 +167,70 @@ class ReleaseFreeGate:
             'settle',
             'holding for the carton to come to rest (bottom_gap=%s m, resting=%s stable_streak=%d/%d)'
             % ('n/a' if g is None else '%.4f' % g, resting, self._stable, self.settle_ticks),
+            self._stable, z, g, None)
+
+    def free_proof(self, *, carton_z, bottom_gap, support_contact) -> ReleaseFreeDecision:
+        """sim-place-release-residual-bind-v1: the POSITIVE free-and-resting HOLD tick. Returns the same
+        ``'settle'`` / ``'lift'`` / ``'refuse'`` actions as :meth:`settle`, but a BOUND carton can never
+        reach ``'lift'``.
+
+        ``carton_z`` is the measured carton CENTRE z, ``bottom_gap`` the carton-bottom-minus-support-top gap
+        (logged only), ``support_contact`` True when a carton-vs-SUPPORT contact pair has been reported
+        (the PR 384 logger / a direct contact query) since the detach. The proof of freedom is EITHER:
+          * ``support_contact`` True -- a free carton resting on the support reports a carton-vs-support
+            contact; a welded carton held OFF the deck reports NONE (coldwin106's zero contact pairs), or
+          * a measured SETTLE -- the carton dropped at least ``settle_drop_min_m`` below the release height
+            and then came to rest (stable for ``settle_ticks`` consecutive ticks). A carton still rigidly
+            held at seat height by a surviving weld cannot drop, so it cannot satisfy this.
+        Neither within ``settle_window_ticks`` => ``'refuse'`` (``RELEASE_NOT_FREE kind=no-support-contact``)
+        WITHOUT lifting. PURE. (The coupled-rise abort + follow() remain the backstop during the lift.)"""
+        self._ticks += 1
+        z = self._finite(carton_z)
+        g = self._finite(bottom_gap)
+        if self._release_baseline is None and z is not None:
+            self._release_baseline = z
+        if z is not None:
+            self._min_z = z if self._min_z is None else min(self._min_z, z)
+        # A real settle DROP: the carton fell at least settle_drop_min_m below the release height.
+        drop = None
+        if self._release_baseline is not None and z is not None:
+            drop = self._release_baseline - z
+            if drop >= self.settle_drop_min_m:
+                self._dropped = True
+        # Rest = carton-centre z stable between consecutive ticks (same eps as the legacy stable check).
+        stable = z is not None and self._prev_z is not None and abs(z - self._prev_z) <= self.stable_eps_m
+        self._prev_z = z if z is not None else self._prev_z
+        contact = bool(support_contact)
+        # Stable-rest streak only counts once a positive-freedom SIGNAL is present (a support contact, or a
+        # real drop onto the support) -- so a carton held RIGID+stable by a surviving weld (no contact, no
+        # drop) never accumulates the streak and the window elapses to a refusal.
+        if stable and (contact or self._dropped):
+            self._stable += 1
+        else:
+            self._stable = 0
+        if self._stable >= self.settle_ticks:
+            self.lift_baseline = z
+            how = 'support contact' if contact else ('settle drop %.4f m' % (drop if drop is not None else 0.0))
+            return ReleaseFreeDecision(
+                'lift',
+                'carton PROVED free+resting (%s; bottom_gap=%s m, stable for %d ticks) -- clearance-lift the '
+                'gripper before the lateral retreat'
+                % (how, 'n/a' if g is None else '%.4f' % g, self._stable),
+                self._stable, z, g, None)
+        if self._ticks >= self.settle_window_ticks:
+            return ReleaseFreeDecision(
+                'refuse',
+                'kind=no-support-contact: no carton-vs-support contact AND no settle drop >= %.3f m within %d '
+                'ticks after the detach (support_contact=%s dropped=%s last bottom_gap=%s m) -- the carton is '
+                'NOT provably free of the gripper (a surviving weld would read stable+resting), refusing the '
+                'clearance lift' % (self.settle_drop_min_m, self.settle_window_ticks, contact, self._dropped,
+                                    'n/a' if g is None else '%.4f' % g),
+                self._stable, z, g, None)
+        return ReleaseFreeDecision(
+            'settle',
+            'holding for POSITIVE proof of freedom (support_contact=%s dropped=%s stable_streak=%d/%d '
+            'bottom_gap=%s m)' % (contact, self._dropped, self._stable, self.settle_ticks,
+                                  'n/a' if g is None else '%.4f' % g),
             self._stable, z, g, None)
 
     def rising_with_gripper(self, *, carton_z) -> ReleaseFreeDecision:

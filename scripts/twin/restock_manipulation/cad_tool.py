@@ -216,6 +216,42 @@ def is_tool_side_collider(path_str, tool_side=TOOL_SIDE_COLLIDERS):
     return any(('/' + t) in str(path_str) for t in tool_side)
 
 
+#: sim-place-release-residual-bind-v1: the tool-side panel-collider LINKS the importer leaves as INSTANCE
+#: PROXIES (only suction_cups is de-instanced, by author_native_gripper). The carry-disable's stage.Traverse()
+#: SKIPS instance proxies, so these stayed LIVE through carry AND release (coldwin106): at the pressed set-down
+#: they sit coincident with the carton face (min_gap 0), and the re-enabled carton gets a penetration contact
+#: whose friction lifts it. De-instancing their collider subtrees (pre-physics, like suction_cups) makes
+#: _set_carton_collision's traversal reach + author them, so the disable AND the deferral actually cover them.
+PANEL_COLLIDERS = tuple(t for t in TOOL_SIDE_COLLIDERS if t != 'suction_cups')
+
+
+def deinstance_panel_colliders(stage, names=PANEL_COLLIDERS):
+    """Pre-physics: de-instance the ``names`` tool-side collider subtrees so a later ``stage.Traverse()`` can
+    REACH and author their ``CollisionEnabled`` (an instance proxy is read-only and invisible to Traverse).
+    Mirrors ``author_native_gripper``'s de-instance of suction_cups. MUST run BEFORE ``world.reset()`` builds
+    the tensor-backed view (re-authoring a view-covered prim invalidates it -- the coldwin101 class). PURE
+    USD; best-effort (never raises). Returns the de-instanced link names."""
+    from pxr import Usd
+    done = []
+    for prim in stage.Traverse():
+        if prim.GetName() not in names:
+            continue
+        changed = False
+        if prim.IsInstanceable():
+            prim.SetInstanceable(False)
+            changed = True
+        for p in Usd.PrimRange(prim):           # the link is now de-instanced; de-instance any inner instances
+            if p != prim and p.IsInstanceable():
+                p.SetInstanceable(False)
+                changed = True
+        if changed:
+            done.append(prim.GetName())
+    print('NATIVE_GRIPPER panel colliders de-instanced (sim-place-release-residual-bind-v1): %s -- the '
+          'carry-disable + deferral now cover them (were LIVE instance proxies the stage.Traverse skipped)'
+          % (','.join(done) or '[]'), flush=True)
+    return done
+
+
 def collision_groups_to_toggle(groups):
     """sim-collect-retreat-fault-v1: map a toggle request to (touch_carton, touch_tool_side). Pure.
 
@@ -272,7 +308,8 @@ def defer_tool_collision_enabled(config=None, environ=None):
 
 def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
                            max_gap=SIM_MAX_GRIP_DISTANCE, force_limit=30.,
-                           clearance_offset=None, retry_interval=1e6, stroke_limit=None):
+                           clearance_offset=None, retry_interval=1e6, stroke_limit=None,
+                           deinstance_tool_colliders=False):
     """Author BEFORE physics starts, on the task's composed output stage only.
 
     body_path must name the actual rigid body carrying the CAD panel (importers
@@ -426,13 +463,21 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
             UsdPhysics.CollisionAPI(p).CreateCollisionEnabledAttr().Set(False)
             disabled += 1
     print('NATIVE_GRIPPER panel colliders disabled on %s: %d' % (body_path, disabled), flush=True)
+    # sim-place-release-residual-bind-v1 (opt-in; default off => byte-identical): ALSO de-instance the
+    # surface_plate_1..6 + cube_without_surface_plates collider subtrees here (pre-physics, the same safe
+    # window as the suction_cups de-instance above), so the carry-disable's stage.Traverse() + the release
+    # deferral actually reach them -- otherwise they stay LIVE instance proxies coincident with the pressed
+    # carton face and drag it on the clearance lift (coldwin106). The native surface gripper only de-instances
+    # suction_cups; this extends it to the whole tool-side set when the residual-bind fix is on.
+    if deinstance_tool_colliders:
+        deinstance_panel_colliders(stage)
     return gripper_path
 
 
 class NativePanelContact:
     """Native contact/latch feedback only; zero fallback welds or object poses."""
     def __init__(self, stage, gripper_path, *, diagnostic=None, sim_attach_fallback=False,
-                 defer_tool_collision=None, release_detach_robust=None):
+                 defer_tool_collision=None, release_detach_robust=None, release_residual_bind=None):
         import isaacsim.robot.surface_gripper._surface_gripper as surface_gripper
         self.stage, self.path = stage, gripper_path
         # Labelled sim attach-fallback, default OFF (see SIM_ATTACH_CONTACT_MM). _fallback_body holds the
@@ -472,6 +517,22 @@ class NativePanelContact:
                   'weld joint is disabled (body rels cleared + jointEnabled=False) BEFORE RemovePrim and the '
                   'freed carton is made dynamic with zeroed residual velocity, so a runtime prim removal that '
                   'does not re-sync still drops the PhysX constraint', flush=True)
+        # sim-place-release-residual-bind-v1 (opt-in; DEFAULT OFF => byte-identical). coldwin106 proved that
+        # even with the robust detach ON the carton rose EXACTLY with the gripper (+19 mm, x/y stable to
+        # 0.1 mm) with ZERO carton-vs-support contact -- the sim-attach-fallback FixedJoint's PhysX constraint
+        # SURVIVED the USD disable+RemovePrim (a runtime USD edit does not re-sync into the tensor-backed
+        # PhysX scene). With this on, _release_fallback runs the PHYSICS-layer residual-bind clear AFTER the
+        # ordered detach: query the carton's surviving joints + kinematic flag, drop/clear each, reconcile
+        # PhysX, re-query and log RELEASE_RESIDUAL_BIND by name. See release_residual_bind.
+        from . import release_residual_bind as _residual_bind_mod
+        self._release_residual_bind = (bool(release_residual_bind) if release_residual_bind is not None
+                                       else _residual_bind_mod.residual_bind_clear_enabled())
+        if self._sim_attach_fallback and self._release_residual_bind:
+            print('SIM_ATTACH_FALLBACK release residual-bind clear armed (sim-place-release-residual-bind-v1): '
+                  'after the ordered detach the physics layer is queried for any joint still referencing the '
+                  'carton + a stuck kinematic flag, each is cleared + PhysX reconciled, and the residual is '
+                  'logged by name (RELEASE_RESIDUAL_BIND) so the next run NAMES whatever still binds the '
+                  'released carton', flush=True)
         self.api = surface_gripper.acquire_surface_gripper_interface()
         self.api.set_write_to_usd(True)
         self.closed_status = surface_gripper.GripperStatus.Closed
@@ -692,7 +753,30 @@ class NativePanelContact:
             _rd.apply_release_ops(ops, self, body_path=body, joint_path=joint_path)
             print('SIM_ATTACH_FALLBACK release body=%s%s'
                   % (body, ' (robust detach)' if robust else ''), flush=True)
+            # Default-on, read-only coupling diagnostic (names a residual bind even when the opt-in clear is off).
             self._release_coupling_diag(body)
+            # sim-place-release-residual-bind-v1 (opt-in; default off => byte-identical): after the ordered
+            # detach, query the PHYSICS layer for anything still binding the carton (a surviving joint PRIM
+            # the detach did not remove + the known fallback joint's surviving PhysX constraint + a stuck
+            # kinematic flag + a gripper collider still live at release), clear each, reconcile PhysX and log
+            # RELEASE_RESIDUAL_BIND by name. self is the physics-layer adapter (the methods below). The
+            # companion positive free check is the real freedom guarantee; this NAMES + undoes the bind.
+            if getattr(self, '_release_residual_bind', False):
+                from . import release_residual_bind as _rrb
+                try:
+                    _rrb.clear_residual_binds(self, body_path=body, joint_path=joint_path)
+                except Exception as exc:  # a diagnostic must never crash the release
+                    print('%s_ERROR %s: %s' % (_rrb.TOKEN, type(exc).__name__, exc), flush=True)
+        # sim-place-release-residual-bind-v1: reset the carton-vs-support contact latch at the detach (if the
+        # place-contact logger wired one) so the post-detach free check measures a FRESH window -- only a
+        # contact from the FREED carton resting on the support counts, not the welded descent contact. Optional
+        # => None => no-op => byte-identical.
+        _reset = getattr(self, '_support_contact_reset', None)
+        if _reset is not None:
+            try:
+                _reset()
+            except Exception:
+                pass
         self._fallback_joint = self._fallback_body = None
 
     def _release_coupling_diag(self, body_path):
@@ -824,6 +908,159 @@ class NativePanelContact:
             rb.CreateAngularVelocityAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
             print('SIM_ATTACH_FALLBACK freed carton velocity zeroed body=%s (robust detach)'
                   % body_path, flush=True)
+
+    # ------------------------------------- residual-bind adapter (release_residual_bind.clear_residual_binds)
+    # sim-place-release-residual-bind-v1: the physics-layer QUERY + CLEAR the ordered pure core dispatches to.
+    # joints_referencing_carton / carton_kinematic are the SAME two quantities the fm GPU release-jump bench
+    # samples per tick, so the clear is bench-validatable; drop_joint / physx_resync own the actual mutation.
+    def joints_referencing_carton(self, body_path):
+        """Every joint PRIM on the stage whose body0/body1 still targets ``body_path`` (a surviving joint
+        the detach did not remove). A USD traversal -- the SAME enumeration the GPU bench uses. Best-effort
+        (never raises): returns a tuple of prim paths."""
+        try:
+            from . import release_residual_bind as _rrb
+            return tuple(_rrb.joints_targeting_body(self.stage, body_path))
+        except Exception as exc:
+            print('RELEASE_RESIDUAL_BIND joints_referencing_carton skipped (%s: %s)'
+                  % (type(exc).__name__, exc), flush=True)
+            return ()
+
+    def carton_kinematic(self, body_path):
+        """The carton's kinematic flag (``physics:kinematicEnabled``) or None when unknown/no rigid body.
+        Rules the kinematic-residual hypothesis in or out by number. Best-effort; never raises."""
+        try:
+            from pxr import UsdPhysics
+            prim = self.stage.GetPrimAtPath(body_path)
+            if not (prim and prim.IsValid() and prim.HasAPI(UsdPhysics.RigidBodyAPI)):
+                return None
+            attr = UsdPhysics.RigidBodyAPI(prim).GetKinematicEnabledAttr()
+            return bool(attr.Get()) if (attr and attr.HasAuthoredValue()) else False
+        except Exception:
+            return None
+
+    def drop_joint(self, joint_path):
+        """Drop a joint at the physics layer: USD-disable (clear body rels + jointEnabled=False) then
+        RemovePrim, idempotent-safe. Re-asserting on the KNOWN fallback path (even after the detach removed
+        the prim) is deliberate -- paired with physx_resync it targets a surviving PhysX constraint. Never
+        raises (a residual-bind clear must not crash the release)."""
+        try:
+            self.disable_weld_joint(joint_path)
+        except Exception as exc:
+            print('RELEASE_RESIDUAL_BIND disable skipped path=%s (%s: %s)'
+                  % (joint_path, type(exc).__name__, exc), flush=True)
+        try:
+            prim = self.stage.GetPrimAtPath(joint_path)
+            if prim and prim.IsValid():
+                self.stage.RemovePrim(joint_path)
+        except Exception as exc:
+            print('RELEASE_RESIDUAL_BIND remove skipped path=%s (%s: %s)'
+                  % (joint_path, type(exc).__name__, exc), flush=True)
+
+    def physx_resync(self):
+        """Reconcile the structural USD change (dropped joint / cleared kinematic) into the RUNNING PhysX
+        scene -- the physics-layer seam a runtime USD edit does NOT re-sync through on its own (the
+        coldwin106 surviving constraint). Best-effort + NON-DESTRUCTIVE: it calls the available
+        ``omni.physx`` update that processes pending USD object changes WITHOUT the whole-scene reset that
+        ``force_load_physics_from_usd`` would do (which would teleport the arm mid-run). The exact effective
+        call is confirmed by the fm release-jump bench and swapped here as a one-liner; when no runtime
+        constraint-reconcile API is present the release still fails SAFE via the positive free check. Never
+        raises."""
+        try:
+            from omni.physx import get_physx_interface
+            iface = get_physx_interface()
+            # Prefer a targeted, non-destructive USD-change flush when the build exposes one; fall back to
+            # the simulation-update tick, which processes pending object-change notices for the running scene.
+            for name in ('update_transformations', 'update_simulation'):
+                fn = getattr(iface, name, None)
+                if fn is None:
+                    continue
+                try:
+                    if name == 'update_transformations':
+                        fn(True, True)
+                    else:
+                        fn(0.0, 0.0)
+                    print('RELEASE_RESIDUAL_BIND physx_resync via %s' % name, flush=True)
+                    return
+                except Exception:
+                    continue
+            print('RELEASE_RESIDUAL_BIND physx_resync=unavailable (no runtime reconcile API; the positive '
+                  'free check is the freedom guarantee)', flush=True)
+        except Exception as exc:
+            print('RELEASE_RESIDUAL_BIND physx_resync skipped (%s: %s)'
+                  % (type(exc).__name__, exc), flush=True)
+
+    def carton_parent(self, body_path):
+        """The carton prim's USD PARENT path (or None). A parent OFF the scenario root names a reparent
+        coupling (object_attachment prime suspect). Best-effort; never raises."""
+        try:
+            prim = self.stage.GetPrimAtPath(body_path)
+            if not (prim and prim.IsValid()):
+                return None
+            parent = prim.GetParent()
+            return str(parent.GetPath()) if parent and parent.IsValid() else None
+        except Exception:
+            return None
+
+    def carton_rigid_enabled(self, body_path):
+        """The carton's ``physics:rigidBodyEnabled`` (or None). A disabled body is frozen by USD, not owned
+        by physics. Best-effort; never raises."""
+        try:
+            from pxr import UsdPhysics
+            prim = self.stage.GetPrimAtPath(body_path)
+            if not (prim and prim.IsValid() and prim.HasAPI(UsdPhysics.RigidBodyAPI)):
+                return None
+            attr = UsdPhysics.RigidBodyAPI(prim).GetRigidBodyEnabledAttr()
+            return bool(attr.Get()) if (attr and attr.HasAuthoredValue()) else True
+        except Exception:
+            return None
+
+    def set_carton_rigid_enabled(self, body_path, enabled):
+        """Re-enable (or disable) the carton's rigid body so physics owns its pose again. Best-effort."""
+        try:
+            from pxr import UsdPhysics
+            prim = self.stage.GetPrimAtPath(body_path)
+            if prim and prim.IsValid() and prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                UsdPhysics.RigidBodyAPI(prim).CreateRigidBodyEnabledAttr().Set(bool(enabled))
+                print('SIM_ATTACH_FALLBACK carton rigidBodyEnabled set to %s body=%s'
+                      % (bool(enabled), body_path), flush=True)
+        except Exception as exc:
+            print('RELEASE_RESIDUAL_BIND set_carton_rigid_enabled skipped (%s: %s)'
+                  % (type(exc).__name__, exc), flush=True)
+
+    def gripper_collider_states(self):
+        """Every CollisionAPI prim under the gripper root with its (path, collision_enabled, tool_side)
+        state -- the per-collider diagnostic for the pad-friction hypothesis (a gripper collider left
+        ENABLED at release overlapping the re-enabled carton drags it by contact friction, invisible to the
+        carton-vs-cart logger). Best-effort; never raises."""
+        out = []
+        try:
+            from pxr import Usd, UsdPhysics
+            root = self.stage.GetPrimAtPath(self.path)
+            if not (root and root.IsValid()):
+                return out
+            for p in Usd.PrimRange(root):
+                if not p.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                attr = UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr()
+                enabled = bool(attr.Get()) if (attr and attr.HasAuthoredValue()) else True
+                out.append((str(p.GetPath()), enabled, bool(is_tool_side_collider(p.GetPath()))))
+        except Exception as exc:
+            print('RELEASE_RESIDUAL_BIND gripper_collider_states skipped (%s: %s)'
+                  % (type(exc).__name__, exc), flush=True)
+        return out
+
+    def disable_gripper_collider(self, path):
+        """Disable one gripper collider (CollisionEnabled=False) at release so it cannot drag the freed
+        carton; mark the tool-side deferral so the next grasp close restores it. Best-effort."""
+        try:
+            from pxr import UsdPhysics
+            prim = self.stage.GetPrimAtPath(path)
+            if prim and prim.IsValid() and prim.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
+                self._tool_collision_deferred = True
+        except Exception as exc:
+            print('RELEASE_RESIDUAL_BIND disable_gripper_collider skipped path=%s (%s: %s)'
+                  % (path, type(exc).__name__, exc), flush=True)
 
     def read(self):
         # PURE OBSERVER of the installed plugin's latch (the plugin manages the PhysX joint

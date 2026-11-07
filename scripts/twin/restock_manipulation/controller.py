@@ -929,7 +929,9 @@ class TransferController:
                 rest_gap_m=cl.release_free_rest_gap_m,
                 settle_window_ticks=cl.release_free_settle_window_ticks,
                 lift_dz_m=cl.release_free_lift_dz_m, follow_frac=cl.release_free_follow_frac,
-                coupled_abort_m=getattr(cl, 'release_free_coupled_abort_m', None))
+                coupled_abort_m=getattr(cl, 'release_free_coupled_abort_m', None),
+                positive_free=getattr(cl, 'release_free_positive', False),
+                settle_drop_min_m=getattr(cl, 'release_free_settle_drop_min_m', 0.003))
         self._released_detached = False   # a weld detach is confirmed; the free-check sub-state owns retreat
         self._rf_stage = 'settle'         # release_free sub-stage: 'settle' (hold) -> 'lift' -> (proceed/fail)
         # sim-robust-phase-timeout-during-recovery-v1: credit the per-phase timeout clock for the sim time
@@ -2674,7 +2676,14 @@ class TransferController:
         half_h = self.profile.dimensions[2] / 2.0
         bottom_gap = (carton_z - half_h) - float(self.target_surface[2])
         if self._rf_stage == 'settle':
-            dec = gate.settle(carton_z=carton_z, bottom_gap=bottom_gap)
+            # sim-place-release-residual-bind-v1: when the POSITIVE free check is on, require a carton-vs-
+            # support contact OR a measured settle drop (a bound carton can satisfy neither) before the lift;
+            # off => the legacy stable-z settle() owns the hold (byte-identical).
+            if getattr(gate, 'positive_free', False):
+                dec = gate.free_proof(carton_z=carton_z, bottom_gap=bottom_gap,
+                                      support_contact=bool(getattr(s, 'carton_support_contact', False)))
+            else:
+                dec = gate.settle(carton_z=carton_z, bottom_gap=bottom_gap)
             if dec.action == 'refuse':
                 return self._fail('RELEASE_NOT_FREE: ' + dec.reason)
             if dec.action == 'lift':
