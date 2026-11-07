@@ -1162,6 +1162,28 @@ class IsaacPort:
         except Exception as exc:                          # noqa: BLE001
             print('PHASE_AWARE_COLLECT release skipped: %r' % (exc,), flush=True)
 
+    def _fire_transfer_preshed(self):
+        """sim-transfer-vram-preshed-v1: run the transfer-entry pre-shed ONCE on the first transfer entry.
+
+        No-op (byte-identical) unless the boot wiring installed ``_transfer_preshed`` (opt-in). Fires the
+        configured release sequence and RAISES :class:`transfer_preshed.TransferPreshedInsufficientFree`
+        (propagated to fail the run by name) if the post-shed free VRAM is still below the floor. An
+        unexpected error in the sequencing itself is logged and swallowed (never breaks the tick) -- the
+        named insufficient-free refusal is the only intended failure."""
+        cfg=getattr(self,'_transfer_preshed',None)
+        if cfg is None or getattr(self,'_transfer_preshed_done',False):
+            return
+        self._transfer_preshed_done=True
+        from . import transfer_preshed as _tp
+        try:
+            _tp.run_preshed(cfg, getattr(self,'_transfer_preshed_actuators',{}) or {},
+                            sampler=getattr(self,'_transfer_preshed_sampler',None),
+                            log=lambda line: print(line, flush=True))
+        except _tp.TransferPreshedInsufficientFree:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- sequencing faults must not crash the tick
+            print('TRANSFER_PRESHED skipped: %r' % (exc,), flush=True)
+
     def begin_action(self,action,job):
         # fm380/fm381 stage-scoped sensing FALLBACK: the primary trigger is grasp-confirmed (before
         # lift, in the step path). If a run somehow never welds, the FIRST transition into a non-sensing
@@ -1186,6 +1208,12 @@ class IsaacPort:
                 monitor.begin_stage(action)
             except Exception:  # noqa: BLE001 -- monitoring must never break a stage transition
                 pass
+        # sim-transfer-vram-preshed-v1: on ENTERING transfer, before its second full-res (arm) render
+        # boots, PROACTIVELY shed the decode cameras / collect ESDF bounds / mast feed and gate the
+        # transfer render on >= 1.5 GB free. None (default) => no-op => byte-identical. A
+        # TransferPreshedInsufficientFree PROPAGATES (fails the run by name) -- that is the whole point.
+        if action=='transfer':
+            self._fire_transfer_preshed()
         writer=getattr(self,'_progress_writer',None)
         if writer is not None:
             writer.begin(action, getattr(self,'_sim_now',0.0))

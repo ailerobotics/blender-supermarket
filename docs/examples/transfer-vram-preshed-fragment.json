@@ -1,0 +1,19 @@
+{
+  "__doc__": "sim-transfer-vram-preshed-v1 ON values. MERGE these blocks into a full-chain live_pose TRANSFER mission runtime-config (e.g. the coldwin93 config mission-runtime-coldwin93.json). They fix the cw93 transfer OOM: on entering the transfer stage, BEFORE its second full-res (arm masked-depth) render boots, the pre-shed deterministically drops the secondary/mast feed, switches the decode/source render to economy and releases the collect-stage capture buffers + collect ESDF bounds, logs VRAM_PRESHED with the before/after headroom, and REFUSES the transfer render BY NAME unless >= 1.5 GB is free; and the spike guard PAUSES each cuMotion plan retry (and any new render) while free VRAM is below 400 MiB, failing by name if it does not recover instead of letting the allocator spike to the 13.1 GB SIGSEGV. Both DEFAULT OFF: absent blocks => byte-identical run. GPU rule: one run at a time via flock /tmp/aile-gpu.lock, never --force, whispr (~2.2 GB) never touched.",
+  "transfer_preshed": {
+    "enabled": true,
+    "min_free_mib": 1536,
+    "require_min_free": true,
+    "order": ["mast_feed", "decode_economy", "collect_capture", "collect_esdf_bounds"]
+  },
+  "transfer_spike_guard": {
+    "enabled": true,
+    "floor_mib": 400,
+    "poll_period_s": 0.5,
+    "max_wait_s": 20
+  },
+  "_preshed_note": "Fires ONCE on the first transfer begin_action, driven from isaac_port via transfer_vram_wiring. Each shed maps to a runtime seam the bundle builds: mast_feed -> close the opt-in mast bridge + drop the port publish hook; decode_economy / collect_capture -> the fm380 stage-scoped teardown (DESTROY the ~0.95 GB of never-read station decode render products). A shed with no runtime seam this run (collect_esdf_bounds; or decode_economy when no teardown handle exists) is SKIPPED and logged -- those are boot-time levers (set masked_depth.economy / author tighter ESDF bounds). The >= min_free_mib gate then refuses the transfer render BY NAME (VRAM_PRESHED ... + TransferPreshedInsufficientFree) if the available seams did not free enough, instead of booting into a near-full card. NEVER sheds the live_pose arm feed, nvblox or the planner.",
+  "_spike_guard_note": "Opt-in on the host too via env RESTOCK_TRANSFER_SPIKE_GUARD=1 (RESTOCK_SPIKE_GUARD_FLOOR_MIB / _POLL_S / _MAX_WAIT_S tune it) -- the ros_adapter planner retry loop reads it from env because the host process has no mission config in hand. The Isaac side reads this config block. wait_for_headroom proceeds immediately when free >= floor or the sampler is unavailable (never wedges a run it cannot measure); it pauses+polls below the floor and fails by name only when free stays below it for the whole max_wait_s.",
+  "_budget_note": "Pre-launch gate: python3 -m twin.restock.gpu_budget --transfer --preshed --spike-guard <config.json> must exit 0 (accepted). Without --preshed --spike-guard the cw93 config exits 1 (refused: predicted peak ~13190 MiB > card - 1 GB), matching the measured 13142 MiB crash.",
+  "_expected_pass": "mission.json state=complete through transfer; console carries TRANSFER_PRESHED enabled=..., VRAM_PRESHED before_free=... after_free=... (after >= 1536), and -- if the planner retries beside a low card -- VRAM_SPIKE_GUARD_PAUSE/RESUME (or a clean 'planning failed (vram spike guard ...)' by name instead of a SIGSEGV). vram-headroom.json peak stays below the 12 GiB top."
+}

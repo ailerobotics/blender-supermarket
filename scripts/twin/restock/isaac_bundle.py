@@ -1024,6 +1024,24 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     else:
         closers_extra = ()
 
+    # sim-transfer-vram-preshed-v1: transfer-entry pre-shed + planner/render spike guard (both DEFAULT
+    # OFF, absent keys => port attrs stay None => byte-identical). cw93 crashed because transfer entered
+    # with the decode cameras + collect ESDF bounds still resident (117 MiB free), into which the planner
+    # retries spiked to 13.1 GB. The pre-shed PROACTIVELY frees that headroom at transfer entry and gates
+    # the transfer render on >= 1.5 GB free; the spike guard pauses a new render below the 400 MiB floor.
+    from . import transfer_vram_wiring as _tvram
+    _preshed_sampler = None
+    if (_tvram._transfer_preshed.from_config(config).active
+            or _tvram._spike_guard.from_config(config).active):
+        _mon = getattr(port, '_vram_monitor', None)
+        if _mon is not None and getattr(_mon, '_sampler', None) is not None:
+            _preshed_sampler = _mon._sampler          # reuse the headroom monitor's live sampler
+        else:
+            _preshed_sampler, _preshed_closer = _vram.make_sampler()
+            closers_extra = closers_extra + (_preshed_closer,)
+    _tvram.wire_transfer_vram_guards(port, config, sensing_sources=assembly.sensing_sources,
+                                     sampler=_preshed_sampler)
+
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)
     closers = closers + closers_extra

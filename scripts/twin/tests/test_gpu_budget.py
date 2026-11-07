@@ -94,6 +94,71 @@ def test_runs_by_file_path_with_a_config(tmp_path):
     assert 'num_feeds' in proc.stdout and "'num_feeds': 1" in proc.stdout
 
 
+# --------------------------------------------------------------------------- transfer model (sim-transfer-vram-preshed-v1)
+# The cw93 config: live_pose transfer, arm masked-depth feed at economy resolution_scale 0.5, mast off.
+_CW93_CONFIG = {
+    'masked_depth': {'enabled': True, 'economy': {'resolution_scale': 0.5, 'publish_interval_s': 0.1}},
+    'mast_depth': {'enabled': False},
+}
+
+
+def test_transfer_lean_base_decomposition_preserves_the_legacy_anchor():
+    # lean base + decode cameras + collect ESDF bounds == the measured transfer mission base.
+    assert (g.TRANSFER_LEAN_BASE_MIB + g.DECODE_CAMERAS_MIB
+            + g.ESDF_COLLECT_BOUNDS_MIB) == pytest.approx(g.BASE_MISSION_MIB, abs=1e-6)
+
+
+def test_cw93_transfer_is_refused_without_the_preshed():
+    """The cw93 transfer modelled as it ran: decode cameras + collect ESDF bounds resident AND the full
+    planner-retry working set -> predicted peak over the card (reproduces the 13.1 GB SIGSEGV)."""
+    v = g.check_transfer_budget(_CW93_CONFIG, preshed=False, spike_guard=False)
+    assert not v.fits
+    assert v.free_at_peak_mib < 0                               # over the whole card
+    # The modelled peak matches the measured crash (gpuVRAM_0 = 13142 MiB) within the model tolerance.
+    assert v.predicted_peak_mib == pytest.approx(13142.0, abs=120.0)
+
+
+def test_cw93_transfer_is_accepted_with_the_preshed_and_spike_guard():
+    v = g.check_transfer_budget(_CW93_CONFIG, preshed=True, spike_guard=True)
+    assert v.fits
+    assert v.free_at_peak_mib >= v.margin_mib                   # clears card - 1 GB
+    # the post-shed STEADY headroom also clears the >= 1.5 GB the transfer render must boot into
+    assert v.detail['preshed_free_ok'] is True
+    assert v.free_at_steady_mib >= g.PRESHED_MIN_FREE_MIB
+
+
+def test_preshed_alone_without_spike_guard_still_refused():
+    # The pre-shed opens steady headroom but the UNGUARDED planner spike still breaches card - 1 GB:
+    # both mitigations are required (so the ON fragment enables both).
+    v = g.check_transfer_budget(_CW93_CONFIG, preshed=True, spike_guard=False)
+    assert not v.fits
+    assert v.detail['preshed_free_ok'] is True                  # steady is fine; the spike is the problem
+
+
+def test_transfer_margin_is_card_minus_1gb():
+    assert g.TRANSFER_PEAK_MARGIN_MIB == pytest.approx(1024.0)
+    v = g.check_transfer_budget(_CW93_CONFIG, preshed=True, spike_guard=True)
+    # fits iff predicted peak <= card - margin
+    assert (v.predicted_peak_mib <= v.detail['card_mib'] - v.margin_mib) == v.fits
+
+
+def test_preshed_drops_the_mast_feed_from_the_transfer_peak():
+    cfg = dict(_CW93_CONFIG, mast_depth={'enabled': True})
+    with_mast = g.check_transfer_budget(cfg, preshed=False, spike_guard=False)
+    preshed = g.check_transfer_budget(cfg, preshed=True, spike_guard=True)
+    assert with_mast.detail['mast_feed_mib'] > 0
+    assert preshed.detail['mast_feed_mib'] == 0                 # the secondary feed is shed
+
+
+def test_transfer_cli_exit_codes(capsys, tmp_path):
+    cfg = tmp_path / 'cw93.json'
+    cfg.write_text(json.dumps(_CW93_CONFIG))
+    assert g._main(['--transfer', str(cfg)]) == 1                               # refused (no mitigation)
+    assert g._main(['--transfer', '--preshed', '--spike-guard', str(cfg)]) == 0  # accepted
+    out = capsys.readouterr().out
+    assert 'GPU_TRANSFER_BUDGET fits=False' in out and 'GPU_TRANSFER_BUDGET fits=True' in out
+
+
 def test_by_path_and_by_module_agree(tmp_path):
     # The by-path repair must not change the verdict: -m and the file-path form print the same line.
     cfg = tmp_path / 'mission.json'
