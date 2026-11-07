@@ -60,6 +60,7 @@ KEY_CONSUMER = {
     'transfer_preplace_reach_guard': HOST,   # sim-robust-transfer-preplace-reach-v1: steer the live_pose transfer preplace to the holdable upright clear branch
     'transfer_pick_wrist_guard': HOST,       # sim-robust-transfer-settle-oscillation-v1: extend the clear-wrist-region guard to the live_pose transfer PICK approach+contact (coldwin12 contact limit cycle)
     'transfer_service_carry': HOST,          # sim-service-leg-carry-v1: TRANSIT carry-hold for the shelf-staging live_pose transfer service leg (pick@staging -> carry -> place); pair with runtime shelf_staging
+    'transfer_regrasp': HOST,                # sim-transfer-regrasp-reposition-v1: pad-down re-grasp through the cage mouth for the live_pose transfer PICK (coldwin93 INVERSE_KINEMATICS_FAILURE); pair with config['world_obstacles'] from the parked cart prim pose
     'cart_pan_joint0': HOST,
     'cart_tuck_shape': HOST,
     'base_collision_object': HOST,
