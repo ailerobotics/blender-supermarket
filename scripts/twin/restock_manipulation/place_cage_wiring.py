@@ -163,6 +163,113 @@ def wire_housing_seat(controller, *, log=print):
     return True
 
 
+def build_push_in_geometry(block, urdf_path, *, default_xrdf=None):
+    """Build the :class:`push_in.PushInGeometry` (the live cart geometry the controller's push-in dispatch
+    reads) from a resolved ``place_descent_cage_gate`` HOST block -- the push-in needs the SAME cart pose +
+    shelf collider as the descent gate (sim-place-post-release-push-in-v1). Raises on a missing ``cart_pose``.
+
+    The two closures:
+      * ``shelf_clear_fn(configs) -> min housing-vs-shelf clearance (m)`` -- the PR 383 shelf-inclusive XRDF
+        arm-sphere sweep restricted to the shelf board (the stroke-cap criterion), and
+      * ``carton_com_cart_x(config) -> carton CoM cart-x (m)`` -- the baked pad+carton FK in the cart frame,
+        so the controller turns ``push_in_target_x_m`` into a stroke from the live seat.
+    Needs the URDF FK + the XRDF sphere model + the cart collider AABBs (a pre-baked ``collider_boxes``
+    override, or usd-core)."""
+    import numpy as np
+    from . import place_clearance as pc
+    from . import push_in as pin
+    from .cart_world_obstacle import cart_pose_matrix
+    from .cad_tool import ARM_JOINTS
+    from twin.urdf_probe import parse_urdf
+    cart_pose = _require_cart_pose(block, PLACE_DESCENT_CAGE_GATE_KEY)
+    xrdf = _resolve_xrdf(urdf_path, block.get('xrdf'), default_xrdf)
+    bodies = _resolve_bodies(block)
+    if bodies is None:
+        bodies = pc.rollwagen_collider_boxes()        # author_cart box model (needs usd-core)
+    T_base_cart = cart_pose_matrix(cart_pose)
+    T_cart_base = np.linalg.inv(np.asarray(T_base_cart, float))
+    robot = parse_urdf(str(urdf_path))
+    geom = pc.GripperCartonGeometry.shipped()
+    push_dir = pin.push_direction_base(T_base_cart)
+
+    def shelf_clear_fn(configs):
+        if not configs:
+            return float('inf')
+        per = pc.place_descent_cage_clearance(list(configs), str(urdf_path), str(xrdf), bodies,
+                                              T_base_cart, include=['shelf'])
+        return float(per.get('shelf', float('inf')))
+
+    def carton_com_cart_x(config):
+        cfg = {j: float(config[i]) for i, j in enumerate(ARM_JOINTS)}
+        C = pc._carton_in_base(robot, cfg, geom)
+        return float((T_cart_base @ np.asarray(C, float))[0, 3])
+
+    support = None
+    if 'shelf' in bodies:
+        shelf_lo, shelf_hi = bodies['shelf']
+        shelf_lo_xy = (float(shelf_lo[0]), float(shelf_lo[1]))
+        shelf_hi_xy = (float(shelf_hi[0]), float(shelf_hi[1]))
+        half = np.asarray(pc.CARTON_DIMS_M, float) / 2.0
+        full = float(pc.CARTON_DIMS_M[0] * pc.CARTON_DIMS_M[1])
+
+        def carton_support_fraction(config):
+            cfg = {j: float(config[i]) for i, j in enumerate(ARM_JOINTS)}
+            Cc = T_cart_base @ np.asarray(pc._carton_in_base(robot, cfg, geom), float)
+            corners = [tuple((Cc @ np.array([sx * half[0], sy * half[1], -half[2], 1.0]))[:2])
+                       for sx, sy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]]
+            return pin.clip_area([(float(x), float(y)) for x, y in corners],
+                                 shelf_lo_xy, shelf_hi_xy) / full
+        support = carton_support_fraction
+
+    pg = pin.PushInGeometry(push_dir_base=push_dir, shelf_clear_fn=shelf_clear_fn,
+                            carton_com_cart_x=carton_com_cart_x, carton_support_fraction=support,
+                            meta={'xrdf': xrdf, 'cart_pose': cart_pose})
+    return pg, {'xrdf': xrdf, 'cart_pose': cart_pose}
+
+
+def wire_push_in(controller, config, urdf_path, *, default_xrdf=None, log=print):
+    """sim-place-post-release-push-in-v1: install the live cart geometry the controller's POST-RELEASE
+    push-in dispatch reads, and log a named ``PLACE_PUSH_IN armed`` line the run worker greps before
+    trusting the fragment. Opt-in + byte-identical off: a controller whose ``carton_level.place_push_in`` is
+    off leaves the hook ``None`` (no push-in phase runs). The push-in's knobs (``push_in_target_x_m``,
+    ``push_in_shelf_clear_min_m``, ``push_in_speed``, ...) ride the resolved ``carton_level`` the controller
+    already holds; this function builds + installs the cart GEOMETRY (``controller._push_in_geometry``) from
+    the ``place_descent_cage_gate`` HOST block and arms the phase.
+
+    Returns ``True`` when armed, ``False`` otherwise. Raises ``ValueError`` (loud, never silent) when
+    ``place_push_in`` is on but its ``place_housing_seat`` prerequisite is off (the ``LevelConfig.validate``
+    invariant, re-checked at the boot seam like ``wire_housing_seat``), or when ``place_push_in`` is on but
+    the ``place_descent_cage_gate`` block that carries the cart pose is absent (the push-in cannot find the
+    shelf board without it) -- so a half-wired fragment can never leave the push-in phase armed but blind."""
+    cl = getattr(controller, '_carton_level', None)
+    if cl is None or not getattr(cl, 'place_push_in', False):
+        return False
+    if not getattr(cl, 'place_housing_seat', False):
+        raise ValueError('place_push_in is on but place_housing_seat is off: the push-in nudges the carton '
+                         'off the housing-compatible lip seat PR 385 leaves, which only exists when '
+                         'place_housing_seat is on (set carton_level.place_housing_seat true, or '
+                         'place_push_in false)')
+    desc_block = _coerce_block(config.get(PLACE_DESCENT_CAGE_GATE_KEY), PLACE_DESCENT_CAGE_GATE_KEY)
+    if desc_block is None:
+        raise ValueError('place_push_in is on but the place_descent_cage_gate HOST block (cart_pose + shelf '
+                         'collider) is absent: the push-in reads the SAME cart geometry to cap the stroke by '
+                         'the housing-vs-shelf clearance -- wire place_descent_cage_gate (with '
+                         'include_support true), or set place_push_in false')
+    pg, meta = build_push_in_geometry(desc_block, urdf_path, default_xrdf=default_xrdf)
+    controller._push_in_geometry = pg
+    log('PLACE_PUSH_IN armed target_x=%.4f m shelf_clear_min=%.1f mm speed=%.3f xrdf=%s cart_pose=%s -- after '
+        'the PR 382 seat gate releases the carton at the PR 385 lip seat and the gripper backs clear, the arm '
+        're-contacts the free carton and pushes it inboard (cart -x) to a more centred rest, the stroke CAPPED '
+        'so the side-grip housing keeps the clearance to the shelf board (sim-place-post-release-push-in-v1: a '
+        'bounded nudge -- a CENTRED rest needs a top-down grip, the out-of-scope follow-up)'
+        % (float(getattr(cl, 'push_in_target_x_m', 0.0)),
+           float(getattr(cl, 'push_in_shelf_clear_min_m', 0.010)) * 1000.0,
+           float(getattr(cl, 'push_in_speed', 0.04)), meta['xrdf'],
+           list(meta['cart_pose']) if not isinstance(meta['cart_pose'], (int, float)) else meta['cart_pose']),
+        flush=True)
+    return True
+
+
 def wire_place_cage_gates(controller, config, urdf_path, *, default_xrdf=None, log=print):
     """Install the cart cage-clearance providers on ``controller`` from the HOST ``config`` blocks
     (sim-place-descent-reach-wire-v1). Opt-in + byte-identical off: a gate is wired only when its HOST

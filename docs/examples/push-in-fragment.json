@@ -1,0 +1,47 @@
+{
+  "_comment": "sim-place-post-release-push-in-v1 (coldwin103). The opt-in POST-RELEASE push-in: after the PR 382 seat gate releases the carton at the PR 385 housing-compatible lip seat and the gripper backs clear, the arm re-contacts the free carton and PUSHES it inboard (cart -x) off the +x lip to a more centred rest, then backs out + lifts clear and the stage continues as today. ON values below are for coldwin103 (which is coldwin102's PR-385 config PLUS this push-in block). Default off (place_push_in absent) => byte-identical with coldwin102.",
+
+  "_the_problem": "PR 385 lands the side-grip carton on the rollwagen upper shelf with a mouth-out lip overhang (housing_seat_lip_overhang_m 0.28): the housing clears the shelf board by +36 mm by hanging OUTBOARD of the +x lip, but the carton rests with only ~47% of its base on the shelf and its CoM ~14 mm inboard of the lip -- a close-to-tipping rest that is visually wrong on camera and at risk during the couple->outbound tow. PR 385 named a top-down grip as the follow-up for a centred rest and left it out of scope. This lane adds the bounded in-between: nudge the carton inboard after release.",
+
+  "_the_honest_limit": "CPU-measured against the composed cw100 cart (scripts/check_push_in_descent.py, PR 383 shelf-inclusive XRDF sweep): the side-grip suction HOUSING (cube_without_surface_plates) is COAXIAL with the pad normal and hangs ~0.14 m below the carton bottom, so it cannot follow the carton inboard over the shelf board -- it strikes the board after only ~41 mm of push (penetration onset), while a CENTRED rest needs ~369 mm. A 180 deg wrist roll about the pad normal does NOT lift it (the housing centroid sits ON that axis, so rolling only spins it in place -- housing world-z byte-identical at every roll angle). So the push is a BOUNDED nudge: the stroke is CAPPED so the housing keeps push_in_shelf_clear_min_m (10 mm) to the shelf board. 0.28 seat: CoM 14 mm -> ~40 mm inboard of the lip (tripled margin), housing shelf +10 mm, every cage/deck body >= +122 mm, carton tilt 0.00 deg. A CENTRED rest STILL needs a TOP-DOWN grip (hangs the housing ABOVE the carton) -- the out-of-scope follow-up.",
+
+  "carton_level": {
+    "_existing": "Keep the coldwin102 PR-385 keys: place_pad_down_arrival:true (+ place_from_above:true, level_place:true, pad_down_arrival_*), place_housing_seat:true + housing_seat_z_lift_m:0.0314 + housing_seat_lip_overhang_m:0.28, the seat/release keys (place_seat_gate, place_release_on_contact, release_free_check, closed_loop_*, gravity_compensation, ...). The push-in runs AFTER the release + the gripper-clear retreat and nudges the carton the seat left at the lip; it changes nothing about the descent or the release.",
+
+    "place_push_in": true,
+    "_place_push_in_note": "THE SWITCH. After the seat gate releases + the gripper backs clear, re-contact the free carton and push it inboard (cart -x) off the +x lip. Requires place_housing_seat (the nudge corrects the housing-compatible lip seat PR 385 leaves; validate + the boot wiring both refuse a half-wired config loudly). Requires the place_descent_cage_gate block (the push reads the SAME cart pose + shelf collider to cap the stroke). Default off => the release transitions straight to retreat => byte-identical.",
+
+    "push_in_target_x_m": 0.0,
+    "_target_x_note": "the carton CoM cart-x the push AIMS for (0 = the shelf x-centre; the shelf spans cart-x [-0.377..0.388]). The actual stroke is the MIN of (reach this target) and (the shelf-clearance cap below), and the cap is the binding limit for a centre target: the housing strikes the shelf long before the carton is centred, so coldwin103 moves the CoM from ~14 mm to ~40 mm inboard of the lip, NOT to the centre. Set a value > 0 only for a smaller nudge.",
+
+    "push_in_shelf_clear_min_m": 0.010,
+    "_shelf_clear_min_note": "THE CAP. The stroke is capped so the side-grip housing keeps >= this (10 mm) to the shelf board through the whole approach + stroke + retreat (PR 383 shelf-inclusive sweep). 10 mm = ~30 mm of the ~41 mm penetration-onset stroke -- the housing stays comfortably off the board. Raising it shortens the nudge; lowering it toward 0 approaches the strike (never below 0).",
+
+    "push_in_speed": 0.04,
+    "push_in_accel": 0.08,
+    "_speed_note": "the slow joint-path speed/accel for the nudge (same scale as pad_down_reorient). Bounded so the free carton is pushed flat, not flicked -- the contact is at the carton's lower side face (at/below mid-height), so a slow push slides it without tipping (predicted tilt 0.00 deg, well inside the 2.0 deg bound / 0.15 s grace).",
+
+    "push_in_standoff_m": 0.08,
+    "push_in_backout_m": 0.06,
+    "push_in_waypoints": 6,
+    "push_in_settle_m": 0.010,
+    "push_in_retry_max": 1,
+    "_retry_note": "after the stroke the controller reads the carton pose (the same source the seat gate uses) and logs PLACE_PUSH_IN done/short with x / support_fraction / tilt. If the carton moved < push_in_settle_m (10 mm) of the capped stroke it is 'short' and the push is retried at most push_in_retry_max (1) times, then the stage continues regardless (never an infinite retry)."
+  },
+
+  "place_descent_cage_gate": {
+    "_note": "UNCHANGED from coldwin102 -- the SAME wired descent cage gate block (cart_pose + pre-baked collider_boxes + include_support:true). wire_push_in reads THIS block's cart_pose + shelf collider to build the stroke-clearance cap, so no second cart-geometry block is needed. A cart_pose is required; keep the pre-baked collider_boxes (the COMPOSED cw100 shelf AABB so the cap matches the real board).",
+    "cart_pose": "[keep the coldwin102 4x4 cart-body -> ur_base_link]",
+    "include_support": true,
+    "margin": 0.03,
+    "collider_boxes": "[keep the coldwin102 pre-baked cart-frame AABBs (must include the composed 'shelf' body)]"
+  },
+
+  "_expected_log": "At boot: 'PLACE_PUSH_IN armed target_x=0.0000 shelf_clear_min=10.0 mm speed=0.040 ...' and the config report line 'place_push_in': true. After the release + the gripper-clear retreat: 'PLACE_PUSH_IN phase=push_in begin target_stroke=~374mm capped=~24mm (capped=True ...) predicted_tilt=0.00deg ... -- re-contact the carton and push it inboard off the +x lip', then on completion 'PLACE_PUSH_IN done phase=push_in x=~0.348 support_fraction=~0.55 tilt=0.00 -> retreat'. A short-tracking carton logs 'PLACE_PUSH_IN short ... re-pushing (attempt 1/1)' at most once.",
+
+  "_cpu_proof": "PYTHONPATH=scripts <usd-core-python> scripts/check_push_in_descent.py (exit 0: the stroke is capped to keep the housing off the shelf board, the arm clears cage + deck >= 30 mm, the carton stays level, and its CoM moves inboard off the lip -- for the 0.28 AND 0.26 seats). Unit + wiring + bounded-retry tests: scripts/twin/tests/test_push_in.py.",
+
+  "_bounded_gpu_proof": "Re-run the coldwin102 config with this push-in block (place_push_in:true + the knobs; place_descent_cage_gate already wired) through scripts/run_mobile_restock.py under /tmp/aile-gpu.lock (HEAVY_MB=2500 for whispr). Watch: after the carton is released on the shelf, the arm re-contacts it and the carton slides ~25 mm inboard off the +x lip (CoM ~14 -> ~40 mm inboard), the housing never strikes the shelf board (no PLACE_DESCENT_CAGE_CLEARANCE prim=shelf during the nudge), the carton stays level on camera, and the more-centred rest holds through the couple->outbound tow. A CENTRED rest needs a top-down grip (the out-of-scope follow-up).",
+
+  "_scope": "Only the POST-RELEASE push-in nudge (a new phase between release and retreat on the collect deck place). The grip / pick / transfer stage, the release authority (PR 382 seat gate), the descent itself (PR 385), the PLACE_OBSTRUCTED re-approach counter, and any watchdog/budget change are out of scope. Every switch is opt-in and default-off => a run without place_push_in is byte-identical."
+}

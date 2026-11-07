@@ -699,6 +699,34 @@ PR 383 `place_descent_cage_gate` `include_support: true` already wired). Boot ar
 `scripts/twin/tests/test_place_housing_seat.py`; write-up:
 `data/sim-place-housing-compatible-seat-v1/report.md`.
 
+#### A post-release push-in off the lip (sim-place-post-release-push-in-v1)
+
+The housing-compatible seat above leaves the carton **~47 % on the shelf, CoM ~14 mm inboard of the +x lip**
+— a close-to-tipping rest. Opt-in `carton_level` keys (default off ⇒ byte-identical; requires
+`place_housing_seat` + the wired `place_descent_cage_gate`) add a **post-release nudge**: after the PR 382
+seat gate releases the carton and the gripper backs clear, a new **`push_in`** phase (between `release` and
+`retreat`, on the collect deck place) re-contacts the free carton at the seat and pushes it inboard (cart −x,
+`push_in.plan_push_in`, the carton kept **level** so it slides flat, never tips) toward `push_in_target_x_m`,
+then backs the pad out + lifts clear. The carton pose is read (the seat-gate source) and logged
+`PLACE_PUSH_IN done/short x=… support_fraction=… tilt=…`, with at most `push_in_retry_max` (1) re-push on a
+`short`.
+
+**The honest limit — why it is only a nudge.** The side-grip suction housing (`cube_without_surface_plates`)
+is **coaxial with the pad normal** and hangs ~0.14 m below the carton bottom, so it **cannot follow the
+carton inboard over the shelf board**: it strikes the board after only ~41 mm of push (penetration onset),
+while a *centred* rest needs ~369 mm. A **180° wrist roll about the pad normal does NOT lift it** (the
+housing centroid sits on that axis — rolling spins it in place, housing world-z byte-identical). So the
+stroke is **capped** so the housing keeps `push_in_shelf_clear_min_m` (10 mm) to the board: the 0.28 seat's
+CoM moves **14 → ~40 mm inboard** of the lip (margin tripled), housing shelf +10 mm, every cage/deck body
+≥ +122 mm, tilt 0.00°. A **centred rest still needs a top-down grip** (hangs the housing *above* the carton)
+— the out-of-scope follow-up PR 385 named.
+
+Recommended ON values (coldwin103): `docs/examples/push-in-fragment.json` (`place_push_in: true`,
+`push_in_target_x_m: 0.0`, `push_in_shelf_clear_min_m: 0.010`, on top of the coldwin102 PR 385 block). Boot
+armed log: `PLACE_PUSH_IN armed …` + config-report `place_push_in: true`. CPU proof:
+`scripts/check_push_in_descent.py`, `scripts/twin/tests/test_push_in.py`; write-up:
+`data/sim-place-post-release-push-in-v1/report.md`.
+
 #### The seat gate is the single release authority, incl. the pad-down descent (sim-seat-gate-pad-down-path-v1)
 
 coldwin98 ran the three-stage set-down cleanly, then released the weld **in mid-air 106 mm above the seat**

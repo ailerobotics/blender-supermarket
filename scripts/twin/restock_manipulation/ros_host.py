@@ -399,6 +399,13 @@ def main():
     # resolved carton_level the controller holds; absent/off => byte-identical, no log.
     from .place_cage_wiring import wire_housing_seat
     wire_housing_seat(controller)
+    # sim-place-post-release-push-in-v1: install the live cart geometry the POST-RELEASE push-in dispatch
+    # reads (from the place_descent_cage_gate block) + log PLACE_PUSH_IN armed. Rides the resolved
+    # carton_level the controller holds; absent/off => the hook stays None => byte-identical, no push-in
+    # phase runs. Raises loudly on a half-wired config (place_push_in on, place_housing_seat / the cart
+    # geometry off) -- mirrors wire_housing_seat.
+    from .place_cage_wiring import wire_push_in
+    wire_push_in(controller, config, args.urdf)
     # sim-arm-reactive-replan-v1 (PR-B): wire the execution-time corridor watch to the sibling's
     # perceived-clearance ESDF source (the wrapped GatedMotionPort). Inert unless BOTH
     # reactive_arm_replan and perception_collision_gate are on (the watch needs the live ESDF).
@@ -566,6 +573,10 @@ def main():
         # transform is armed (the 'PLACE_HOUSING_SEAT armed' log above carries the overhang / z-lift).
         'place_housing_seat': (controller._carton_level is not None
                                and getattr(controller._carton_level, 'place_housing_seat', False)),
+        # sim-place-post-release-push-in-v1: whether the post-release push-in is armed (the config flag is
+        # on AND the cart geometry reached the controller -- the 'PLACE_PUSH_IN armed' log above carries the
+        # target_x / shelf-clear-min / cart_pose). False => the push-in phase never runs => byte-identical.
+        'place_push_in': getattr(controller, '_push_in_geometry', None) is not None,
     }), flush=True)
     # sim-collision-dt-render-lead-floor-v1: log the DERIVED collision/feedback freshness band once at
     # host start, so every run dir's host-stack.log records the floor/ceiling in force (the future-lead

@@ -191,6 +191,10 @@ def _free_controller(stage='settle', gate=None, poll='running', liftoff=(0, 0, 0
     c.target_surface = (1.11, 0.08, 0.448)
     c._transitions = []
     c._transition = lambda ph: (c._transitions.append(ph), setattr(c, 'phase', ph))[1]
+    # sim-place-post-release-push-in-v1: the release->retreat seam now routes through _next_after_release()
+    # (push_in when the post-release nudge is active, else retreat). These release-threshold tests do not
+    # configure the push-in, so it stays off => 'retreat' (byte-identical with the old self._transition('retreat')).
+    c._next_after_release = lambda: 'retreat'
     c._result = lambda controls=(): ('RESULT', tuple(controls))
     c._fail = lambda r: ('FAIL', r)
     c.evidence = []

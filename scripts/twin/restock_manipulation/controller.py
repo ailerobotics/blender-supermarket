@@ -53,7 +53,9 @@ COLLECT_RETREAT_LIFTOFF_PAN_TOL = 0.02   # rad
 # of the move phases use the deadline budget. Non-move phases (observe/grasp/release/verify/idle) issue
 # no begin, so a watchdog motion fault there is not re-issuable -> hard fail.
 _STAGED_MOVE_PHASES = frozenset({'tuck', 'pan', 'retreat_tuck', 'stow'})
-_GENERAL_MOVE_PHASES = frozenset({'approach', 'contact', 'lift', 'preplace', 'place', 'retreat'})
+# sim-place-post-release-push-in-v1: 'push_in' is a general (non-staged) joint-path move between release
+# and retreat (opt-in; never entered when place_push_in is off).
+_GENERAL_MOVE_PHASES = frozenset({'approach', 'contact', 'lift', 'preplace', 'place', 'retreat', 'push_in'})
 # fm390: the place-side poses are re-registered in the place_approach base frame after the base drives
 # in front of the cart mouth, so they are NOT reach-gated in the pickup frame during observe.
 _PLACE_SIDE_PHASES = frozenset({'preplace', 'place', 'retreat'})
@@ -748,6 +750,15 @@ class TransferController:
         # sim-place-housing-compatible-seat-v1: log the housing-seat transform at most once per place.
         self._housing_seat_logged = False
         self._housing_seat_degenerate_logged = False
+        # sim-place-post-release-push-in-v1: the live cart geometry the POST-RELEASE push-in dispatch reads,
+        # installed by place_cage_wiring.wire_push_in when carton_level.place_push_in is on. None (default)
+        # => the push-in phase never runs (the release transitions straight to retreat) => byte-identical.
+        self._push_in_geometry = None
+        self._push_in_retries = 0            # bounded re-push attempts used this op
+        self._push_in_com_before = None      # carton pose (world xy) captured at push-in entry, for the shift
+        self._push_in_issued_plan = False    # a push-in path has been dispatched (awaiting the move terminal)
+        self._push_in_expected_shift = 0.0   # the capped stroke the last dispatched push expects the carton to move
+        self._push_in_last_config = None     # the end-of-stroke arm config (for the done-log x / support fraction)
         # sim-preplace-leg2-level-v1: the held chassis attitude during the station place. The collect place
         # pins the base at a non-level parking-brake attitude (chassis_station_pitch_hold_pitch_deg /
         # _roll_deg), so ur_base_link +Z is off world +Z and the shoulder_pan YAW axis is off vertical -- a
@@ -1174,6 +1185,12 @@ class TransferController:
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
         self._place_reoriented = False   # sim-place-pad-down-arrival-v1: fresh reorient sub-stage per op
         self._housing_seat_logged = False   # sim-place-housing-compatible-seat-v1: fresh seat log per op
+        # sim-place-post-release-push-in-v1: fresh post-release push-in sub-state per op.
+        self._push_in_retries = 0
+        self._push_in_com_before = None
+        self._push_in_issued_plan = False
+        self._push_in_expected_shift = 0.0
+        self._push_in_last_config = None
         # sim-release-threshold-carton-frame-v1: fresh post-detach free-check sub-state per op.
         self._released_detached = False
         self._rf_stage = 'settle'
@@ -1380,6 +1397,157 @@ class TransferController:
                      tuple(round(c, 4) for c in seat[:3])), flush=True)
             self._housing_seat_logged = True
         return out
+
+    def _push_in_active(self):
+        """sim-place-post-release-push-in-v1: the post-release push-in nudge is active for THIS collect-deck
+        place. Requires ``carton_level.place_push_in`` AND the wired cart geometry (``_push_in_geometry``,
+        installed by ``place_cage_wiring.wire_push_in``) on a collect-deck place. Off / non-collect-deck /
+        unwired => False => the release transitions straight to retreat (byte-identical)."""
+        return (self._carton_level is not None
+                and getattr(self._carton_level, 'place_push_in', False)
+                and self._push_in_geometry is not None
+                and self._collect_deck_place())
+
+    def _next_after_release(self):
+        """The phase the release transitions to: ``'push_in'`` when the post-release push-in is active, else
+        ``'retreat'`` (byte-identical). The push-in phase itself always continues to ``'retreat'``."""
+        return 'push_in' if self._push_in_active() else 'retreat'
+
+    def _issue_push_in(self, robot, measured, s):
+        """sim-place-post-release-push-in-v1: build + dispatch the post-release push-in path -- re-contact the
+        free carton at the PR 385 housing-compatible seat and push it inboard (cart -x) toward
+        ``push_in_target_x_m``, the stroke CAPPED so the side-grip housing keeps ``push_in_shelf_clear_min_m``
+        to the shelf board, then back the pad out + lift clear. Returns a controller result (the dispatched
+        move) or a named ``_fail``; the carton pose before the push is captured for the done/short verdict.
+        Mirrors ``_issue_pad_down_reorient`` (same seat source + FK link + level machinery)."""
+        from twin.restock_manipulation import carton_level as cl
+        from twin.restock_manipulation import push_in as pin
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        pg = self._push_in_geometry
+        cl_cfg = self._carton_level
+        if (pg is None or self._carton_up_in_tool is None or 'place' not in self.poses
+                or self.poses['place'] is None):
+            # The push-in phase should never be entered without these; fail by name rather than fall through
+            # to a blind retreat under the push_in phase label.
+            return self._fail('PLACE_PUSH_IN_REJECTED post-release push-in is armed but the seat / carton '
+                              'up-axis / place pose is unavailable -- cannot plan the nudge')
+        up = self._carton_up_in_tool
+        limits = self._place_level_limits() or None
+        tcp_link = self._place_fk_link(robot, list(measured))
+        # The housing-compatible seat (the same corrected seat the descent landed the carton on).
+        seat_tcp = self._housing_seat_tcp(tuple(float(c) for c in self.poses['place'][:3]))
+        # The stroke to the configured carton CoM cart-x target, from the live seat (capped inside plan).
+        try:
+            contact = cl.level_place_ik(robot, list(seat_tcp[:3]), up, list(measured), tool_link=tcp_link,
+                                        limits=limits, fast=True)
+            contact_vec = [float(contact[j]) for j in ARM_JOINTS]
+            seat_com_x = float(pg.carton_com_cart_x(contact_vec))
+        except Exception as exc:
+            return self._fail('PLACE_PUSH_IN_REJECTED cannot re-contact the carton at the seat %s while '
+                              'level: %s' % ([round(float(c), 4) for c in seat_tcp[:3]], exc))
+        target_stroke = max(0.0, seat_com_x - float(getattr(cl_cfg, 'push_in_target_x_m', 0.0)))
+        if target_stroke <= 1e-4:
+            # The carton is already at/inboard of the target -- nothing to push. Skip straight to retreat.
+            print('PLACE_PUSH_IN skip phase=push_in: carton CoM cart-x %.4f already at/inboard of target '
+                  '%.4f -- no nudge needed' % (seat_com_x, float(getattr(cl_cfg, 'push_in_target_x_m', 0.0))),
+                  flush=True)
+            self._transition('retreat')
+            return self._result()
+        try:
+            plan = pin.plan_push_in(
+                robot, seat_tcp, up, list(measured), pg.push_dir_base, target_stroke_m=target_stroke,
+                shelf_clear_min_m=float(getattr(cl_cfg, 'push_in_shelf_clear_min_m', 0.010)),
+                shelf_clear_fn=pg.shelf_clear_fn, standoff_m=float(getattr(cl_cfg, 'push_in_standoff_m', 0.08)),
+                backout_m=float(getattr(cl_cfg, 'push_in_backout_m', 0.06)),
+                waypoints=int(getattr(cl_cfg, 'push_in_waypoints', 6)), bound_deg=cl_cfg.bound_deg,
+                tool_link=tcp_link, limits=limits)
+        except ValueError as exc:
+            return self._fail('PLACE_PUSH_IN_REJECTED the push-in pose is unreachable while level '
+                              '(the pad cannot re-contact / push the carton here): %s' % exc)
+        if plan.max_tilt_deg > cl_cfg.bound_deg + 1e-6:
+            return self._fail('PLACE_PUSH_IN_REJECTED predicted carton tilt %.2f deg exceeds the %.2f deg '
+                              'bound during the nudge' % (plan.max_tilt_deg, cl_cfg.bound_deg))
+        if plan.achieved_stroke_m <= 1e-4:
+            # The shelf-clearance cap allows no inboard travel from here (the housing is already at the
+            # board). Skip the push rather than dispatch a zero-travel path.
+            print('PLACE_PUSH_IN skip phase=push_in: the shelf-clearance cap allows no inboard travel '
+                  '(housing already within %.1f mm of the shelf board at the seat)'
+                  % (float(getattr(cl_cfg, 'push_in_shelf_clear_min_m', 0.010)) * 1000.0), flush=True)
+            self._transition('retreat')
+            return self._result()
+        self._push_in_expected_shift = float(plan.achieved_stroke_m)
+        self._push_in_last_config = list(plan.stroke[-1]) if plan.stroke else list(plan.contact_config)
+        self._push_in_com_before = (list(s.placed_pose) if s.placed_pose is not None
+                                    and len(s.placed_pose) >= 2 else None)
+        print('PLACE_PUSH_IN phase=push_in begin target_stroke=%.1fmm capped=%.1fmm (capped=%s, shelf_clear_min'
+              '=%.1fmm) seat_com_x=%.4f -> target_x=%.4f predicted_tilt=%.2fdeg (<= %.2f) n=%d%s -- re-contact '
+              'the carton and push it inboard off the +x lip (sim-place-post-release-push-in-v1)'
+              % (plan.target_stroke_m * 1000, plan.achieved_stroke_m * 1000, plan.capped,
+                 float(getattr(cl_cfg, 'push_in_shelf_clear_min_m', 0.010)) * 1000, seat_com_x,
+                 float(getattr(cl_cfg, 'push_in_target_x_m', 0.0)), plan.max_tilt_deg, cl_cfg.bound_deg,
+                 len(plan.waypoints),
+                 ' (retry %d)' % self._push_in_retries if self._push_in_retries else ''), flush=True)
+        self.motion.begin_joint_path(plan.waypoints, list(measured), slow=True, goal_tol=0.12,
+                                     speed=float(getattr(cl_cfg, 'push_in_speed', 0.04)),
+                                     accel=float(getattr(cl_cfg, 'push_in_accel', 0.08)))
+        self.issued = True
+        self._push_in_issued_plan = True
+        return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+
+    def _push_in_complete(self, now, s):
+        """sim-place-post-release-push-in-v1: the push-in path just completed. Read the carton pose (the same
+        ``s.placed_pose`` source the seat gate uses), log ``PLACE_PUSH_IN done/short`` with the achieved
+        inboard shift + the final CoM cart-x + support fraction + tilt, and either advance to retreat or
+        (when ``short`` and budget remains) re-push ONCE. Returns a controller result."""
+        from twin.restock_manipulation import push_in as pin
+        cl_cfg = self._carton_level
+        pg = self._push_in_geometry
+        expected = float(self._push_in_expected_shift)
+        before = self._push_in_com_before
+        after = list(s.placed_pose) if s.placed_pose is not None and len(s.placed_pose) >= 2 else None
+        # Measured horizontal carton displacement (world xy) vs the expected capped stroke. A missing pose
+        # (real rig / verify off) => trust the model (treat as on-target) so the stage continues.
+        if before is not None and after is not None:
+            measured = float(math.hypot(after[0] - before[0], after[1] - before[1]))
+        else:
+            measured = expected
+        verdict, reason = pin.classify_result(expected, measured,
+                                              settle_m=float(getattr(cl_cfg, 'push_in_settle_m', 0.010)))
+        final_cfg = self._push_in_last_config
+        com_x = (float(pg.carton_com_cart_x(final_cfg)) if (pg is not None and final_cfg is not None)
+                 else float('nan'))
+        support = (float(pg.carton_support_fraction(final_cfg))
+                   if (pg is not None and final_cfg is not None
+                       and pg.carton_support_fraction is not None) else float('nan'))
+        tilt = 0.0
+        _robot = self._fk_model()
+        if self._carton_up_in_tool is not None and final_cfg is not None and _robot is not None:
+            try:
+                tilt = pin._carton_tilt_deg(_robot, final_cfg, self._carton_up_in_tool,
+                                            tool_link=self._place_fk_link(_robot, final_cfg),
+                                            root='ur_base_link')
+            except Exception:
+                tilt = 0.0
+        if verdict == 'short' and self._push_in_retries < int(getattr(cl_cfg, 'push_in_retry_max', 1)):
+            self._push_in_retries += 1
+            self.issued = False
+            self._push_in_issued_plan = False
+            print('PLACE_PUSH_IN short phase=push_in x=%.4f support_fraction=%.2f tilt=%.2f -- %s; re-pushing '
+                  '(attempt %d/%d)' % (com_x, support, tilt, reason, self._push_in_retries,
+                                       int(getattr(cl_cfg, 'push_in_retry_max', 1))), flush=True)
+            self.evidence.append({'place_push_in_short': {'sim_time': float(now), 'measured_shift_m': measured,
+                                   'expected_shift_m': expected, 'retry': int(self._push_in_retries)}})
+            return self._result()
+        tag = 'done' if verdict == 'done' else 'short'
+        print('PLACE_PUSH_IN %s phase=push_in x=%.4f support_fraction=%.2f tilt=%.2f -- %s%s -> retreat'
+              % (tag, com_x, support, tilt, reason,
+                 ' (retry budget exhausted, continuing)' if verdict == 'short' else ''), flush=True)
+        self.evidence.append({'place_push_in_%s' % tag: {
+            'sim_time': float(now), 'measured_shift_m': measured, 'expected_shift_m': expected,
+            'com_cart_x': com_x, 'support_fraction': support, 'tilt_deg': tilt}})
+        self._push_in_issued_plan = False
+        self._transition('retreat')
+        return self._result()
 
     def _place_obstructed(self, now, decision):
         """sim-place-release-on-contact-v1: the descending carton met a NON-support body (a cage post, not
@@ -2608,7 +2776,7 @@ class TransferController:
             print('RELEASE_FREE_BEGIN phase=release now=%.3f: weld detached -- holding to prove the carton is '
                   'free of the gripper and resting before the retreat' % now, flush=True)
             return
-        self._transition('retreat')
+        self._transition(self._next_after_release())
 
     def _release_free_step(self, now, s):
         """sim-release-threshold-carton-frame-v1: the post-detach free-and-resting + clearance-lift sub-state
@@ -2624,7 +2792,7 @@ class TransferController:
             print('RELEASE_FREE_SKIP phase=release now=%.3f: no measured carton pose -- retreating without '
                   'the free-and-resting check' % now, flush=True)
             self._released_detached = False
-            self._transition('retreat')
+            self._transition(self._next_after_release())
             return self._result()
         carton_z = float(s.placed_pose[2])
         half_h = self.profile.dimensions[2] / 2.0
@@ -2642,7 +2810,7 @@ class TransferController:
                           'clearance lift' % (now, dec.reason), flush=True)
                     self.evidence.append({'release_free_lift_unsolved': {'sim_time': float(now)}})
                     self._released_detached = False
-                    self._transition('retreat')
+                    self._transition(self._next_after_release())
                     return self._result()
                 print('RELEASE_FREE_LIFT phase=release now=%.3f carton_z=%.4f bottom_gap=%.4f: %s'
                       % (now, carton_z, bottom_gap, dec.reason), flush=True)
@@ -2665,13 +2833,13 @@ class TransferController:
             dec = gate.follow(carton_z=carton_z)
             if dec.action == 'refuse':
                 return self._fail('RELEASE_NOT_FREE: ' + dec.reason)
-            print('RELEASE_FREE_CLEAR phase=release now=%.3f carton_z=%.4f: %s -> retreat'
-                  % (now, carton_z, dec.reason), flush=True)
+            print('RELEASE_FREE_CLEAR phase=release now=%.3f carton_z=%.4f: %s -> %s'
+                  % (now, carton_z, dec.reason, self._next_after_release()), flush=True)
             self.evidence.append({'release_free_clear': {
                 'sim_time': float(now), 'carton_z': carton_z,
                 'rise': (None if dec.rise is None else float(dec.rise))}})
             self._released_detached = False
-            self._transition('retreat')
+            self._transition(self._next_after_release())
             return self._result()
         if outcome != 'running':
             return self._fail('invalid release clearance-lift motion outcome')
@@ -3516,6 +3684,29 @@ class TransferController:
                           'contact to the release at the place pose (transfer_attach=weld)', flush=True)
                 self.evidence.append(label)
             self._transition('approach')
+        # sim-place-post-release-push-in-v1: the post-release push-in phase is a general joint-path move
+        # that is NOT in self.poses (it has no registered pose target), so it is dispatched + polled here,
+        # separately from the pose-based phases. Only reached when place_push_in is on AND the cart geometry
+        # was wired (``_next_after_release`` routes release -> push_in); off => never entered (byte-identical).
+        if self.phase == 'push_in':
+            robot = self._fk_model()
+            if robot is None:
+                return self._fail('PLACE_PUSH_IN_REJECTED post-release push-in needs the FK model (no URDF)')
+            if not self.issued:
+                return self._issue_push_in(robot, s.joint_positions, s)
+            try:
+                outcome = self.motion.poll()
+            except Exception as exc:  # noqa: BLE001 -- route a raise through the general move retry
+                return self._raised_move_exc(exc, staged=False)
+            if outcome == 'failed':
+                _take = getattr(self.motion, 'take_exec_abort_reason', None)
+                _distinct = _take() if callable(_take) else None
+                return self._fail(_distinct or 'push-in move failed')
+            if outcome == 'succeeded':
+                return self._push_in_complete(now, s)
+            if outcome != 'running':
+                return self._fail('invalid push-in motion outcome')
+            return self._result()
         if self.phase in self.poses:
             # sim-motion-active-guard-v1: a PLACE_OBSTRUCTED lateral re-approach (sim-place-release-on-
             # contact-v1) transitioned place->preplace to re-descend, but the OBSTRUCTED place descent is

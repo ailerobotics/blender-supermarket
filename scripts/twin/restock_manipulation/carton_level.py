@@ -874,6 +874,31 @@ class LevelConfig:
     place_housing_seat: bool = False
     housing_seat_lip_overhang_m: float = 0.0
     housing_seat_z_lift_m: float = 0.0
+    # sim-place-post-release-push-in-v1: the opt-in POST-RELEASE push-in. After the PR 382 seat gate
+    # releases the carton at the PR 385 lip seat and the gripper backs clear, re-contact the free carton's
+    # lip-facing (+x) face with the suction pad at/below its mid-height and push it inboard (cart -x) toward
+    # ``push_in_target_x_m`` (the carton CoM cart-x target, e.g. 0 = the shelf x-centre), then back the pad
+    # out and lift clear; the stage continues as today. CPU-measured against the composed cw100 cart
+    # (data/sim-place-post-release-push-in-v1): the side-grip suction HOUSING is COAXIAL with the pad normal
+    # and hangs ~0.14 m below the carton bottom, so it cannot follow the carton inboard over the shelf board
+    # (it strikes the board after ~41 mm of push; a CENTRED rest needs ~369 mm). So the stroke is CAPPED so
+    # the housing keeps ``push_in_shelf_clear_min_m`` to the shelf board -- a bounded nudge that triples the
+    # +x-lip CoM margin (0.28 seat: ~14 -> ~44 mm inboard) WITHOUT striking the board. A centred rest needs a
+    # TOP-DOWN grip (hangs the housing above the carton) -- the follow-up, out of scope. Requires
+    # ``place_housing_seat`` (the push-in corrects the housing-compatible lip seat it leaves). The 2.0 deg
+    # bound / grace / carton dims are UNTOUCHED (the carton is kept level, so a level free carton is pushed
+    # flat, never tipped). The cart geometry (cart_pose + shelf collider) is wired from the HOST
+    # ``place_descent_cage_gate`` block by ``place_cage_wiring.wire_push_in``. Default OFF => byte-identical.
+    place_push_in: bool = False
+    push_in_target_x_m: float = 0.0          # the carton CoM cart-x the push aims for (0 = the shelf centre)
+    push_in_shelf_clear_min_m: float = 0.010  # the housing must keep >= this to the shelf board through the stroke
+    push_in_speed: float = 0.04
+    push_in_accel: float = 0.08
+    push_in_standoff_m: float = 0.08         # the above-contact vertical standoff the pad descends from / lifts to
+    push_in_backout_m: float = 0.06          # the lateral (+x) back-off before the clearing lift
+    push_in_waypoints: int = 6               # per-leg densification (approach / stroke / retreat)
+    push_in_settle_m: float = 0.010          # achieved-vs-expected CoM tolerance for the done/short verdict
+    push_in_retry_max: int = 1               # bounded re-push attempts when the carton reads 'short'
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -1013,6 +1038,28 @@ class LevelConfig:
             raise ValueError('carton_level.place_housing_seat requires place_pad_down_arrival to be on '
                              '(it transforms the three-stage pad-down place seat the branch selector and '
                              'the descent read; there is no other seat for it to correct)')
+        # sim-place-post-release-push-in-v1
+        for nm, v in (('push_in_shelf_clear_min_m', self.push_in_shelf_clear_min_m),
+                      ('push_in_speed', self.push_in_speed), ('push_in_accel', self.push_in_accel),
+                      ('push_in_standoff_m', self.push_in_standoff_m),
+                      ('push_in_backout_m', self.push_in_backout_m),
+                      ('push_in_settle_m', self.push_in_settle_m)):
+            if not (math.isfinite(float(v)) and float(v) > 0):
+                raise ValueError(f'carton_level.{nm} must be a finite positive number of metres')
+        if not math.isfinite(float(self.push_in_target_x_m)):
+            raise ValueError('carton_level.push_in_target_x_m must be a finite number (the carton CoM '
+                             'cart-x the push aims for, in metres)')
+        if isinstance(self.push_in_waypoints, bool) or not isinstance(self.push_in_waypoints, int) \
+                or self.push_in_waypoints < 2:
+            raise ValueError('carton_level.push_in_waypoints must be an integer >= 2')
+        if isinstance(self.push_in_retry_max, bool) or not isinstance(self.push_in_retry_max, int) \
+                or self.push_in_retry_max < 0:
+            raise ValueError('carton_level.push_in_retry_max must be a non-negative integer '
+                             '(0 => log PLACE_PUSH_IN short and continue with no re-push)')
+        if self.place_push_in and not self.place_housing_seat:
+            raise ValueError('carton_level.place_push_in requires place_housing_seat to be on '
+                             '(the push-in nudges the carton off the housing-compatible lip seat PR 385 '
+                             'leaves; there is no lip seat to correct without it)')
         # sim-preplace-level-gate-v1
         if not (math.isfinite(self.preplace_gate_bound_deg)
                 and 0 < self.preplace_gate_bound_deg <= self.bound_deg):
@@ -1097,7 +1144,9 @@ def resolve_level_config(spec):
                  'preplace_soft_effort_nm', 'preplace_branch_select_budget_s',
                  'pad_down_arrival_shift_m', 'pad_down_arrival_height_m',
                  'pad_down_reorient_speed', 'pad_down_reorient_accel',
-                 'housing_seat_lip_overhang_m', 'housing_seat_z_lift_m'):
+                 'housing_seat_lip_overhang_m', 'housing_seat_z_lift_m',
+                 'push_in_target_x_m', 'push_in_shelf_clear_min_m', 'push_in_speed', 'push_in_accel',
+                 'push_in_standoff_m', 'push_in_backout_m', 'push_in_settle_m'):
         if fnum in spec and spec[fnum] is not None:
             kw[fnum] = float(spec[fnum])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
@@ -1108,7 +1157,7 @@ def resolve_level_config(spec):
                  'preplace_descent_feasible',
                  'place_release_on_contact', 'release_cancel_handshake', 'release_reissue',
                  'release_free_check', 'place_seat_gate', 'place_pad_down_arrival',
-                 'place_housing_seat'):
+                 'place_housing_seat', 'place_push_in'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     # sim-place-release-on-contact-v1 / sim-place-release-cancel-handshake-v1 / sim-release-open-reissue-v1
@@ -1121,7 +1170,7 @@ def resolve_level_config(spec):
     for fint in ('place_release_effort_consecutive', 'place_release_stall_ticks', 'place_reapproach_max',
                  'release_cancel_stopped_ticks', 'release_reissue_log_every',
                  'release_free_settle_ticks', 'release_free_settle_window_ticks',
-                 'pad_down_reorient_waypoints'):
+                 'pad_down_reorient_waypoints', 'push_in_waypoints', 'push_in_retry_max'):
         if spec.get(fint) is not None:
             kw[fint] = int(spec[fint])
     if spec.get('place_release_contact_gap_mm') is not None:
