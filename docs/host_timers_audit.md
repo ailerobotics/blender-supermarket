@@ -305,6 +305,7 @@ earlier), `converted` (this lane), `wall-backstop` (kept wall by design — boun
 | `max_age` / `RESTOCK_SENSOR_MAX_AGE_S` + `render_lead` | sensor-packet freshness window | SIM | sim-clocked |
 | `grasp_press_timeout_s` | pre-weld press budget | SIM | sim-clocked (PR 203) |
 | `collision_stale_tol_s` | held-carton collision-stamp staleness | SIM | sim-clocked |
+| `reissue_settle_timeout_s` / `RESTOCK_REISSUE_SETTLE_S` (internal, default `min(2, phase_timeout)`) | bound on the active motion reaching a terminal result after a re-issue's channel stop, before `REISSUE_MOTION_STILL_ACTIVE` fails by name (sim-motion-active-guard-v1) | SIM | sim-clocked; clamped under `phase_timeout`; NO host/runtime config key |
 | `contact_stuck_wall_s` / `collision_pause_wall_s` / `lift_collision_grace_wall_s` (all default 0 = off) | contact/collision progress bounds | **SIM** | sim-clocked — named `_wall` but `ros_host.py` injects `steady_clock = node.get_clock().now()` (the sim clock); documented clock-name caveat |
 | `grasp_confirm_ticks` / `grasp_wait_ticks` / `collect_source_evidence_wait_ticks` | tick-count budgets | count | count |
 

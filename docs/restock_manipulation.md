@@ -400,6 +400,36 @@ The 2.0° carton bound is untouched (firming a held joint does not move it, so t
 unchanged). Recommended ON values + acceptance: `docs/examples/preplace-wrist2-hold-fragment.json`; CPU
 proof (incl. the real cw66 wrist_2 replay): `scripts/twin/tests/test_preplace_wrist2_hold_v1.py`.
 
+### Serialize every re-issued goal behind the active motion (sim-motion-active-guard-v1)
+
+Both recovery paths above (the **drift re-capture** here, and the **place set-down re-approach** below)
+*re-issue an arm goal*. The motion port guards `begin()`/`begin_joint_goal()` with
+`raise RuntimeError('motion already active')` while a move is still in flight, and the controller's generic
+adapter-failure handler turns that raise into a `HOST_FAULT_ESTOP`. Twice a re-issue fired while the prior
+motion was still active and crashed the host instead of recovering: **coldwin73** (the drift re-capture
+re-issued the pre-place joint goal mid-move) and **coldwin90** (the place re-approach, after the seat gate
+correctly refused the obstructed descent, re-descended while the obstructed descent handle was still active).
+
+The fix is one serialization helper, `TransferController._serialize_reissue`, beneath **both** (already
+opt-in) paths — the flags are unchanged; this is the fix beneath them. Before a re-issued goal it brings the
+active motion to a **terminal** (not-in-flight) state on the channel that actually terminates, confirms the
+handle is terminal, then begins:
+
+- a **driven descent** (the place set-down) is stopped on its own channel via the PR 368 contact-hold
+  (`settle_in_place` + a `{'kind':'contact'}` control so the sim `trajectory_host` *succeeds* holding the
+  current pose — terminal, no fault, no global `/manipulation/stop`, which an `ExecuteTrajectory` cancel
+  would latch);
+- an **action goal** (the pre-place cuMotion/KDL move) is stopped with `motion.cancel()` + a bounded
+  wait on `cancel_outcome()` (PR 334).
+
+It logs `REISSUE_SERIALIZE` / `REISSUE_SERIALIZE_SETTLED`. If the active motion does not reach a terminal
+result within `reissue_settle_timeout_s` sim (internal, env `RESTOCK_REISSUE_SETTLE_S`; see
+`host_timers_audit.md`) it **fails by name** — `REISSUE_MOTION_STILL_ACTIVE`, naming the handle state —
+rather than re-issuing into an in-flight motion, so a recovery is a real second attempt and never a crash.
+A port already terminal (the normal first pre-place entry from a completed lift) is begun immediately with
+no stop issued, so a crash-free run is byte-identical. CPU proof (the helper's three outcomes, the cw73 and
+cw90 replays, byte-identical-inert): `scripts/twin/tests/test_motion_active_guard_v1.py`.
+
 ### Lock the base from pre-place, not the descent (sim-station-lock-from-preplace-v1)
 
 Firming the held wrist (above) removed the give-way but **re-routed** leg 2's shoulder_pan-sweep reaction:
@@ -584,7 +614,9 @@ Every release is **gated on the touched body being the support**: a hit-prim pat
 `place_obstruction_gap_mm`) contact on any other body (a cage `post_*`) is an **obstruction** — the
 controller logs `PLACE_OBSTRUCTED prim=…` and does up to `place_reapproach_max` bounded lateral
 re-approaches (shift the set-down `place_reapproach_shift_m`, re-descend via the standoff) before failing
-by name, never a press or a drop against the post. The soft carried drive is restored for the descent via
+by name, never a press or a drop against the post. The re-descend first brings the obstructed descent to a
+terminal state (**sim-motion-active-guard-v1**, above) so the re-issue is never a `motion already active`
+crash (coldwin90). The soft carried drive is restored for the descent via
 `phase_drive.carried_soft_phases: ["place"]` (hold-firm is already preplace-scoped), bounding any residual
 press to eff400 < the guard. The per-tick `PLACE_RELEASE_TICK` logs carton_z / effort / hit prim /
 trigger. The 2.0° bound is untouched. Recommended ON values + acceptance:
