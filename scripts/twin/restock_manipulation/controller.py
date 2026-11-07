@@ -708,6 +708,18 @@ class TransferController:
         # identical); when set, _issue_gated_preplace_approach refuses an intersecting leg-2 sweep BY NAME
         # (PREPLACE_SWEEP_CLEARANCE prim=... min_clearance=...) before motion, instead of the blind jam.
         self._preplace_cage_clearance = None
+        # Injected place-DESCENT cage-clearance gate (sim-place-descent-reach-cage-v1): callable(waypoints)->
+        # reject|None built by the boot/integration layer from the live coupled cart pose + the host XRDF
+        # (place_clearance.place_descent_cage_clearance_provider). None (default) => the gate is inert (byte-
+        # identical); when set it does TWO things: (a) the place-descent dispatch sweeps the planned leveled
+        # set-down waypoints and refuses an intersecting descent BY NAME (PLACE_DESCENT_CAGE_CLEARANCE
+        # prim=... min_clearance=...) before motion, instead of coldwin87's blind PATH_TOLERANCE wrist-2 jam;
+        # and (b) the carry-connected standoff selector's descent-feasibility predictor
+        # (_preplace_descent_predictor) treats a cage-raking descent as infeasible, so the standoff is chosen
+        # on the PAD-DOWN wrist branch whose descent holds the gripper housing clear of the +x cage mouth
+        # (CPU-proven >= 0.10 m vs the carry-wrist branch's -1.9..-33 mm). See
+        # data/sim-place-descent-reach-cage-v1 and scripts/check_place_descent_reach.py.
+        self._place_descent_cage_gate = None
         # sim-preplace-leg2-level-v1: the held chassis attitude during the station place. The collect place
         # pins the base at a non-level parking-brake attitude (chassis_station_pitch_hold_pitch_deg /
         # _roll_deg), so ur_base_link +Z is off world +Z and the shoulder_pan YAW axis is off vertical -- a
@@ -1828,6 +1840,18 @@ class TransferController:
                 approach_from_above=cl_cfg.place_from_above,
                 above_clearance_m=cl_cfg.place_above_clearance_m,
                 depth_bias_m=cl_cfg.place_depth_bias_m)
+            # sim-place-descent-reach-cage-v1: a candidate standoff whose leveled place descent would drive a
+            # gripper link into the Rollwagen cage (coldwin87's carry-wrist branch: the housing wedges on the
+            # +x mouth side bar as wrist_2 reorients in-cage) is DESCENT-INFEASIBLE -- raise so the selector
+            # discards it and advances to the pad-down wrist branch whose descent holds the housing clear.
+            # Inert unless the boot layer injected the gate (byte-identical off).
+            if self._place_descent_cage_gate is not None:
+                try:
+                    cage_reject = self._place_descent_cage_gate([list(w) for w in plan.waypoints])
+                except Exception:                      # a provider error must never block the select
+                    cage_reject = None
+                if cage_reject is not None:
+                    raise ValueError(cage_reject)
             return max(plan.max_roll, plan.max_pitch)
 
         return _descent_tilt
@@ -3477,6 +3501,27 @@ class TransferController:
                                       'executed max roll=%.2f pitch=%.2f deg (<= bound %.2f)'
                                       % (cl_peak, self._carton_level.closed_loop_authority_deg, mr, mp,
                                          self._carton_level.bound_deg), flush=True)
+                            # sim-place-descent-reach-cage-v1: refuse a leveled place descent whose waypoints
+                            # would drive a gripper link into a Rollwagen cage body (the coldwin87 wedge:
+                            # cube_without_surface_plates on the +x mouth side bar as wrist_2 reorients
+                            # in-cage) BY NAME before motion, instead of the blind PATH_TOLERANCE wrist-2 jam.
+                            # Inert unless the boot/integration layer injected the provider
+                            # (self._place_descent_cage_gate, built by
+                            # place_clearance.place_descent_cage_clearance_provider from the live coupled cart
+                            # pose + host XRDF) => byte-identical off. The standoff selector already prefers a
+                            # cage-clear descent branch (_preplace_descent_predictor); this is the safety net
+                            # on the dispatched path.
+                            if self._place_descent_cage_gate is not None:
+                                try:
+                                    descent_cage_reject = self._place_descent_cage_gate(
+                                        [list(w) for w in waypoints])
+                                except Exception as _dcexc:   # a provider error must never crash the op
+                                    descent_cage_reject = None
+                                    print('PLACE_DESCENT_CAGE_CLEARANCE skipped (provider error: %s)'
+                                          % _dcexc, flush=True)
+                                if descent_cage_reject is not None:
+                                    print(descent_cage_reject, flush=True)
+                                    return self._fail(descent_cage_reject)
                             print('CARTON_LEVEL_PLACE_DESCENT phase=place n=%d predicted_max roll=%.2f '
                                   'pitch=%.2f deg (<= bound %.2f) -- per-point wrist-compensated level '
                                   'set-down at speed=%.3f accel=%.3f rad/s (extension-following droop-cancel '

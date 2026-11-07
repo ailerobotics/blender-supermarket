@@ -573,3 +573,96 @@ def preplace_cage_clearance_provider(urdf_path, xrdf_path, cart_pose, *, bodies=
         return preplace_sweep_reject(per_body, margin=margin)
 
     return _gate
+
+
+# ------------------------- collect place-DESCENT cage sweep (sim-place-descent-reach-cage-v1)
+# The pre-place sweep above checks the carried APPROACH (the leg-2 shoulder_pan arc to the standoff). The
+# place DESCENT that follows -- the leveled straight-line set-down from the +0.08 standoff down onto the
+# support -- has its OWN cage hazard, which the approach sweep does not see: coldwin87's descent plan starts
+# by reorienting shoulder/wrist from the standoff's CARRY wrist orientation (wrist_2 ~ 0.28) to the place
+# PAD-DOWN orientation (wrist_2 ~ 1.63) WHILE the gripper housing sits inside the +x cage mouth, so the
+# UNFILTERED gripper housing link (``cube_without_surface_plates`` / ``surface_plate_*`` -- NOT the
+# cage-filtered carton) wedges against the upper side bar ``side_1_horizontal_6`` and the mouth posts at the
+# descent START (CPU-reconstructed -1.9 mm vs side_1_horizontal_6, the ONLY penetrating config of the whole
+# path; wrist_2 then froze at 0.28 against a 1.63 rad command -> TRAJ_HOST_TRACK_MISS worst_j=4 ->
+# PATH_TOLERANCE_VIOLATED). The REMEDY descent holds the PAD-DOWN wrist branch (wrist_2 ~ 1.63) from entry to
+# the corrected seat, where the same reconstruction reads >= +0.10 m clearance at every collect-place park
+# pose. The gate below is the same cuMotion ARM SPHERE sweep (``preplace_cage_arm_clearance``) applied to the
+# place-descent waypoints; it NAMES the wedge and refuses before motion instead of the blind PATH_TOLERANCE.
+
+# Log / refuse token for the place-descent cage sweep.
+PLACE_DESCENT_CAGE_CLEARANCE = 'PLACE_DESCENT_CAGE_CLEARANCE'
+# Default refuse margin (m) for the place-descent cage sweep: the brief's >= 0.03 m clearance target. Unlike
+# the carried pre-place pan sweep (DEFAULT_PREPLACE_CAGE_MARGIN_M = 0.0, a penetration-only refuse that
+# tolerated the standoff's inherent ~+4 mm cage-width tightness against the FAR side bar), the DESCENT holds
+# the gripper housing on the fixed pad-down wrist branch that clears EVERY cage body by >= 0.10 m when
+# correct, and the failure mode (coldwin87: the housing wedged in the +x mouth, -1.9 .. -33.4 mm across
+# cw87/cw64/cw89, every other config >= +0.10 m) is unambiguous, so the descent gate refuses at the full
+# 30 mm design margin. The CPU calibration caveat (the arm-sphere model vs the authored AABBs) is the same as
+# the pre-place sweep; a clear negative reading is a certain strike and the clear descent reads +0.10 m, far
+# outside the noise.
+DEFAULT_PLACE_DESCENT_CAGE_MARGIN_M = 0.030
+
+
+def place_descent_cage_clearance(configs, urdf_path, xrdf_path, bodies, T_base_cart, *, include=None):
+    """Min cuMotion-arm-sphere clearance (m) to each cart body over the collect place-DESCENT ``configs``.
+
+    The SAME arm-sphere sweep :func:`preplace_cage_arm_clearance` runs for the carried pre-place pan sweep,
+    applied to the place descent's leveled waypoint path (ARM_JOINTS-order configs). Returns
+    ``{body: min arm-sphere clearance over the descent}`` -- negative = a gripper link penetrates that cart
+    body. ``include`` defaults to all; the descent gate keeps the CAGE bodies (:func:`cage_body_names`).
+    Pure/CPU (URDF FK + XRDF sphere model, same as the host)."""
+    return preplace_cage_arm_clearance(configs, urdf_path, xrdf_path, bodies, T_base_cart, include=include)
+
+
+def place_descent_sweep_reject(per_body_min, *, margin=DEFAULT_PLACE_DESCENT_CAGE_MARGIN_M,
+                               support=SUPPORT_BODIES):
+    """The :data:`PLACE_DESCENT_CAGE_CLEARANCE` refuse message when any NON-support cart body's minimum
+    arm-sphere clearance over the place-descent sweep is below ``margin``, else ``None``. ``support`` bodies
+    (deck/shelf -- the surface the carton lands on) are excluded. Names the worst prim + its min_clearance so
+    the lane sees exactly which cage body the descent would strike and by how much."""
+    support = set(support)
+    bad = sorted((v, k) for k, v in per_body_min.items() if k not in support and v < margin)
+    if not bad:
+        return None
+    worst_v, worst_k = bad[0]
+    named = ', '.join('%s=%.1fmm' % (k, v * 1000.0) for v, k in bad)
+    return ('%s prim=%s min_clearance=%.1fmm (margin %.0f mm; cage bodies below it: %s) -- the collect '
+            'place-descent would drive a gripper link into a Rollwagen cage body (coldwin87 wedged the '
+            'suction housing cube_without_surface_plates on the +x mouth side bar at the standoff carry-wrist '
+            'orientation, freezing wrist_2 at a 1.30 rad TRAJ_HOST_TRACK_MISS -> PATH_TOLERANCE_VIOLATED '
+            'abort). Refusing before motion.'
+            % (PLACE_DESCENT_CAGE_CLEARANCE, worst_k, worst_v * 1000.0, margin * 1000.0, named))
+
+
+def place_descent_cage_clearance_provider(urdf_path, xrdf_path, cart_pose, *, bodies=None,
+                                          margin=DEFAULT_PLACE_DESCENT_CAGE_MARGIN_M, include=None,
+                                          cal_offset_m=0.0):
+    """Build the ``callable(waypoints) -> reject|None`` the controller injects as its place-descent
+    cage-clearance gate (sim-place-descent-reach-cage-v1). Opt-in: the controller leaves the hook ``None``
+    (byte-identical) unless a boot/integration layer supplies this provider with the live coupled cart pose +
+    the host XRDF. Mirrors :func:`preplace_cage_clearance_provider` exactly, at the DESCENT margin (30 mm) and
+    with the DESCENT refuse message (:func:`place_descent_sweep_reject`).
+
+    ``cart_pose``: the cart-body -> ur_base_link pose ((x, y, z, yaw) or 4x4). ``bodies``: cart-frame AABBs
+    (default :func:`rollwagen_collider_boxes`, needs usd-core). ``include``: cart-body names to check (default
+    the CAGE bodies). ``margin``: refuse threshold (m). Returns a closure that, given a list of
+    ARM_JOINTS-order waypoint configs, returns the refuse message or ``None``. The closure applies
+    ``cal_offset_m`` (subtracted from every clearance, a SEAL-anchored calibration knob) before the margin
+    test."""
+    from twin.restock_manipulation.cart_world_obstacle import cart_pose_matrix
+    if bodies is None:
+        bodies = rollwagen_collider_boxes()
+    keep = cage_body_names(bodies) if include is None else list(include)
+    T_base_cart = cart_pose_matrix(cart_pose)
+
+    def _gate(waypoints):
+        if not waypoints:
+            return None
+        per_body = preplace_cage_arm_clearance(waypoints, urdf_path, xrdf_path, bodies, T_base_cart,
+                                               include=keep)
+        if cal_offset_m:
+            per_body = {k: v - float(cal_offset_m) for k, v in per_body.items()}
+        return place_descent_sweep_reject(per_body, margin=margin)
+
+    return _gate
