@@ -78,7 +78,7 @@ class ReleaseFreeGate:
     def __init__(self, *, settle_ticks: int = 5, stable_eps_m: float = 0.005, rest_gap_m: float = 0.03,
                  settle_window_ticks: int = 60, lift_dz_m: float = 0.06, follow_frac: float = 0.5,
                  coupled_abort_m: Optional[float] = None, positive_free: bool = False,
-                 settle_drop_min_m: float = 0.003):
+                 settle_drop_min_m: float = 0.003, rest_at_seat_m: Optional[float] = None):
         self.settle_ticks = max(1, int(settle_ticks))
         self.stable_eps_m = float(stable_eps_m)
         self.rest_gap_m = float(rest_gap_m)
@@ -95,6 +95,14 @@ class ReleaseFreeGate:
         # the window => RELEASE_NOT_FREE kind=no-support-contact, WITHOUT the destructive lift.
         self.positive_free = bool(positive_free)
         self.settle_drop_min_m = float(settle_drop_min_m)
+        # sim-place-release-rest-at-seat-v1 (opt-in; None => off => byte-identical): a THIRD positive proof
+        # for a carton the monotonic-z descent (place_descent_monotonic_z) places EXACTLY at the seat -- so
+        # there is no >= settle_drop_min_m drop -- and whose carton-vs-support contact never fires (coldwin107:
+        # bottom_gap -0.3 mm, zero CONTACT_PAIR, yet RELEASE_COUPLING_DIAG proved it fully free). Accept
+        # |bottom_gap| <= rest_at_seat_m with the stable streak, BUT ONLY when this release's coupling
+        # diagnostic was CLEAN (``release_diag_clean``: no joint targets the carton, not kinematic, no live
+        # gripper panel). A still-BOUND carton presents a DIRTY diag, so it can never reach this accept.
+        self.rest_at_seat_m = None if rest_at_seat_m is None else float(rest_at_seat_m)
         # sim-place-release-carton-stays-v1 (opt-in; None => off => byte-identical): the PER-TICK coupled-rise
         # abort threshold. The follow() verdict at lift COMPLETION caught coldwin105's persistent weld only
         # after the carton had risen 0.1494 m with the gripper (then the arm lost its heartbeat on the
@@ -115,6 +123,9 @@ class ReleaseFreeGate:
             raise ValueError('release_free_coupled_abort_m must be a finite positive number of metres or None')
         if not (math.isfinite(self.settle_drop_min_m) and self.settle_drop_min_m > 0):
             raise ValueError('release_free_settle_drop_min_m must be a finite positive number of metres')
+        if self.rest_at_seat_m is not None and not (math.isfinite(self.rest_at_seat_m)
+                                                    and self.rest_at_seat_m > 0):
+            raise ValueError('release_free_rest_at_seat_m must be a finite positive number of metres or None')
         self.reset()
 
     def reset(self) -> None:
@@ -169,7 +180,8 @@ class ReleaseFreeGate:
             % ('n/a' if g is None else '%.4f' % g, resting, self._stable, self.settle_ticks),
             self._stable, z, g, None)
 
-    def free_proof(self, *, carton_z, bottom_gap, support_contact) -> ReleaseFreeDecision:
+    def free_proof(self, *, carton_z, bottom_gap, support_contact,
+                   release_diag_clean: bool = False) -> ReleaseFreeDecision:
         """sim-place-release-residual-bind-v1: the POSITIVE free-and-resting HOLD tick. Returns the same
         ``'settle'`` / ``'lift'`` / ``'refuse'`` actions as :meth:`settle`, but a BOUND carton can never
         reach ``'lift'``.
@@ -201,16 +213,24 @@ class ReleaseFreeGate:
         stable = z is not None and self._prev_z is not None and abs(z - self._prev_z) <= self.stable_eps_m
         self._prev_z = z if z is not None else self._prev_z
         contact = bool(support_contact)
-        # Stable-rest streak only counts once a positive-freedom SIGNAL is present (a support contact, or a
-        # real drop onto the support) -- so a carton held RIGID+stable by a surviving weld (no contact, no
-        # drop) never accumulates the streak and the window elapses to a refusal.
-        if stable and (contact or self._dropped):
+        # sim-place-release-rest-at-seat-v1: the THIRD positive signal -- the carton is at the seat
+        # (|bottom_gap| <= rest_at_seat_m) AND this release's coupling diagnostic was CLEAN. Gated on the
+        # clean diag so a BOUND carton (dirty diag) can never use it.
+        rest_at_seat = (self.rest_at_seat_m is not None and g is not None
+                        and abs(g) <= self.rest_at_seat_m and bool(release_diag_clean))
+        # Stable-rest streak only counts once a positive-freedom SIGNAL is present (a support contact, a
+        # real drop onto the support, or a diag-clean rest at the seat) -- so a carton held RIGID+stable by a
+        # surviving weld (no contact, no drop, DIRTY diag) never accumulates the streak and the window
+        # elapses to a refusal.
+        if stable and (contact or self._dropped or rest_at_seat):
             self._stable += 1
         else:
             self._stable = 0
         if self._stable >= self.settle_ticks:
             self.lift_baseline = z
-            how = 'support contact' if contact else ('settle drop %.4f m' % (drop if drop is not None else 0.0))
+            how = ('support contact' if contact else
+                   ('rest-at-seat (diag clean, |bottom_gap| <= %.4f m)' % self.rest_at_seat_m) if rest_at_seat else
+                   ('settle drop %.4f m' % (drop if drop is not None else 0.0)))
             return ReleaseFreeDecision(
                 'lift',
                 'carton PROVED free+resting (%s; bottom_gap=%s m, stable for %d ticks) -- clearance-lift the '
@@ -220,11 +240,14 @@ class ReleaseFreeGate:
         if self._ticks >= self.settle_window_ticks:
             return ReleaseFreeDecision(
                 'refuse',
-                'kind=no-support-contact: no carton-vs-support contact AND no settle drop >= %.3f m within %d '
-                'ticks after the detach (support_contact=%s dropped=%s last bottom_gap=%s m) -- the carton is '
-                'NOT provably free of the gripper (a surviving weld would read stable+resting), refusing the '
-                'clearance lift' % (self.settle_drop_min_m, self.settle_window_ticks, contact, self._dropped,
-                                    'n/a' if g is None else '%.4f' % g),
+                'kind=no-support-contact: no carton-vs-support contact, no settle drop >= %.3f m, and no '
+                'diag-clean rest-at-seat (rest_at_seat_m=%s diag_clean=%s) within %d ticks after the detach '
+                '(support_contact=%s dropped=%s last bottom_gap=%s m) -- the carton is NOT provably free of '
+                'the gripper (a surviving weld would read stable+resting), refusing the clearance lift'
+                % (self.settle_drop_min_m,
+                   'off' if self.rest_at_seat_m is None else '%.4f' % self.rest_at_seat_m,
+                   bool(release_diag_clean), self.settle_window_ticks, contact, self._dropped,
+                   'n/a' if g is None else '%.4f' % g),
                 self._stable, z, g, None)
         return ReleaseFreeDecision(
             'settle',

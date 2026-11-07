@@ -121,6 +121,12 @@ class Sensors:
     # relay + the place-contact logger are both on; the host gate consumes it only when release_free_positive
     # is on. Carried across the asdict -> JSON -> Sensors(**data) ROS boundary like the fields above.
     carton_support_contact: bool = False
+    # sim-place-release-rest-at-seat-v1: True when THIS release's coupling diagnostic (RELEASE_COUPLING_DIAG /
+    # RELEASE_RESIDUAL_BIND_STATE) was CLEAN -- no joint targets the carton, not kinematic, no live gripper
+    # panel collider. The Isaac driver sets it from the physics-layer release diag; the host rest-at-seat free
+    # proof consumes it (a BOUND carton presents a DIRTY diag, so it can never satisfy rest-at-seat). Carried
+    # across the asdict -> JSON -> Sensors(**data) ROS boundary like the fields above.
+    release_diag_clean: bool = False
     # Driver must reject stale/absent joint/contact/odom data before making a packet.
 
 

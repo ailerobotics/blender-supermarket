@@ -280,3 +280,41 @@ def test_step_lift_unsolved_falls_through_to_retreat():
         if c._transitions:
             break
     assert c._transitions == ['retreat'] and c._released_detached is False
+
+
+# ===================================================================== rest-at-seat free proof
+# sim-place-release-rest-at-seat-v1: a carton the monotonic-z descent places EXACTLY at the seat (no drop,
+# no carton-vs-support contact) is proved free via |bottom_gap| <= rest_at_seat_m, ONLY when the release
+# coupling diag is CLEAN (release_diag_clean True). A still-bound carton presents a dirty diag.
+def _drive_free_proof(gate, *, carton_z, bottom_gap, support_contact, release_diag_clean, ticks):
+    last = None
+    for _ in range(ticks):
+        last = gate.free_proof(carton_z=carton_z, bottom_gap=bottom_gap,
+                               support_contact=support_contact, release_diag_clean=release_diag_clean)
+    return last
+
+
+def test_rest_at_seat_accepts_a_diag_clean_carton_at_the_seat():
+    g = _free_gate(settle_ticks=3, positive_free=True, rest_at_seat_m=0.002)
+    # exactly at the seat (bottom_gap -0.3 mm, within 2 mm), no contact, no drop, but the diag is CLEAN
+    dec = _drive_free_proof(g, carton_z=0.5306, bottom_gap=-0.0003, support_contact=False,
+                            release_diag_clean=True, ticks=6)
+    assert dec.action == 'lift'
+    assert 'rest-at-seat' in dec.reason
+
+
+def test_rest_at_seat_refuses_a_dirty_diag_carton_at_the_seat():
+    g = _free_gate(settle_ticks=3, settle_window_ticks=8, positive_free=True, rest_at_seat_m=0.002)
+    # same rest geometry, but a DIRTY diag (a bound carton held rigid at the seat) -> never lifts, refuses
+    dec = _drive_free_proof(g, carton_z=0.5306, bottom_gap=-0.0003, support_contact=False,
+                            release_diag_clean=False, ticks=10)
+    assert dec.action == 'refuse'
+    assert 'no-support-contact' in dec.reason
+
+
+def test_rest_at_seat_off_is_byte_identical_refuse():
+    # rest_at_seat_m None (off): the clean diag alone does NOT accept -> refuses like the pre-change gate
+    g = _free_gate(settle_ticks=3, settle_window_ticks=8, positive_free=True)
+    dec = _drive_free_proof(g, carton_z=0.5306, bottom_gap=-0.0003, support_contact=False,
+                            release_diag_clean=True, ticks=10)
+    assert dec.action == 'refuse'

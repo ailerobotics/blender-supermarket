@@ -858,6 +858,11 @@ class LevelConfig:
     # destructive lift. Needs ``release_free_check``. Pairs with the RUNTIME ``release_residual_bind`` clear.
     release_free_positive: bool = False
     release_free_settle_drop_min_m: float = 0.003  # min carton drop onto the support that counts as a settle
+    # sim-place-release-rest-at-seat-v1 (opt-in; None => off). A THIRD positive free proof for a carton the
+    # monotonic-z descent places EXACTLY at the seat (no drop) whose carton-vs-support contact never fires
+    # (coldwin107): accept |bottom_gap| <= this with the stable streak, ONLY when this release's coupling
+    # diagnostic was CLEAN (release_diag_clean: no joint on the carton, not kinematic, no live gripper panel).
+    release_free_rest_at_seat_m: object = None     # None => off; a finite positive metre tol => on
     # sim-place-seat-geometry-v1 (brief parts 2+3): the HONEST seat-gated place release. The collect set-down
     # release must fire ONLY when a measured contact (stall/effort) is within ``place_seat_tol_m`` of the
     # CORRECTED modelled seat (support TOP + carton half, carton-centre frame). coldwin87's "solid stall" was
@@ -1079,6 +1084,12 @@ class LevelConfig:
                 and float(self.release_free_coupled_abort_m) > 0):
             raise ValueError('carton_level.release_free_coupled_abort_m must be None or a finite positive '
                              'number of metres (the per-tick coupled-rise abort during the clearance lift)')
+        # sim-place-release-rest-at-seat-v1: nullable rest-at-seat tolerance.
+        if self.release_free_rest_at_seat_m is not None and not (
+                math.isfinite(float(self.release_free_rest_at_seat_m))
+                and float(self.release_free_rest_at_seat_m) > 0):
+            raise ValueError('carton_level.release_free_rest_at_seat_m must be None or a finite positive '
+                             'number of metres (the diag-clean rest-at-seat free proof)')
         if (isinstance(self.place_support_tokens, str) or not hasattr(self.place_support_tokens, '__iter__')
                 or not tuple(self.place_support_tokens)
                 or not all(isinstance(t, str) and t for t in self.place_support_tokens)):
@@ -1227,7 +1238,8 @@ def resolve_level_config(spec):
     for fnum in ('place_release_effort_margin_nm', 'place_release_stall_m', 'place_obstruction_gap_mm',
                  'place_reapproach_shift_m', 'release_cancel_stopped_vel', 'release_confirm_timeout_s',
                  'release_free_stable_eps_m', 'release_free_rest_gap_m', 'release_free_lift_dz_m',
-                 'release_free_follow_frac', 'release_free_settle_drop_min_m', 'place_seat_tol_m'):
+                 'release_free_follow_frac', 'release_free_settle_drop_min_m',
+                 'release_free_rest_at_seat_m', 'place_seat_tol_m'):
         if spec.get(fnum) is not None:
             kw[fnum] = float(spec[fnum])
     for fint in ('place_release_effort_consecutive', 'place_release_stall_ticks', 'place_reapproach_max',

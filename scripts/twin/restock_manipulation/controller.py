@@ -931,7 +931,14 @@ class TransferController:
                 lift_dz_m=cl.release_free_lift_dz_m, follow_frac=cl.release_free_follow_frac,
                 coupled_abort_m=getattr(cl, 'release_free_coupled_abort_m', None),
                 positive_free=getattr(cl, 'release_free_positive', False),
-                settle_drop_min_m=getattr(cl, 'release_free_settle_drop_min_m', 0.003))
+                settle_drop_min_m=getattr(cl, 'release_free_settle_drop_min_m', 0.003),
+                rest_at_seat_m=getattr(cl, 'release_free_rest_at_seat_m', None))
+            if getattr(cl, 'release_free_rest_at_seat_m', None) is not None:
+                print('RELEASE_FREE_REST_AT_SEAT armed tol=%.4f m (sim-place-release-rest-at-seat-v1): a carton '
+                      'placed exactly at the seat by the monotonic-z descent proves free via |bottom_gap| <= tol '
+                      'ONLY when this release\'s coupling diag is clean (joints=0, not kinematic, no live gripper '
+                      'panel) -- the coupled-rise abort stays the lift backstop'
+                      % float(cl.release_free_rest_at_seat_m), flush=True)
         self._released_detached = False   # a weld detach is confirmed; the free-check sub-state owns retreat
         self._rf_stage = 'settle'         # release_free sub-stage: 'settle' (hold) -> 'lift' -> (proceed/fail)
         # sim-robust-phase-timeout-during-recovery-v1: credit the per-phase timeout clock for the sim time
@@ -2681,7 +2688,8 @@ class TransferController:
             # off => the legacy stable-z settle() owns the hold (byte-identical).
             if getattr(gate, 'positive_free', False):
                 dec = gate.free_proof(carton_z=carton_z, bottom_gap=bottom_gap,
-                                      support_contact=bool(getattr(s, 'carton_support_contact', False)))
+                                      support_contact=bool(getattr(s, 'carton_support_contact', False)),
+                                      release_diag_clean=bool(getattr(s, 'release_diag_clean', False)))
             else:
                 dec = gate.settle(carton_z=carton_z, bottom_gap=bottom_gap)
             if dec.action == 'refuse':

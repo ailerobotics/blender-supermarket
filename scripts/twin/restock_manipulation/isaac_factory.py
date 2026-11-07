@@ -551,6 +551,15 @@ class CollectTargetBridge:
                 sc = False
             kwargs = dict(kwargs)
             kwargs['carton_support_contact'] = sc
+        # sim-place-release-rest-at-seat-v1: carry the clean-release-diag flag for the host rest-at-seat gate.
+        dprobe = getattr(self, 'release_diag_clean_probe', None)
+        if dprobe is not None:
+            try:
+                dc = bool(dprobe())
+            except Exception:
+                dc = False
+            kwargs = dict(kwargs)
+            kwargs['release_diag_clean'] = dc
         return kwargs
 
     def set_shelf_target_provider(self, provider):
@@ -564,6 +573,13 @@ class CollectTargetBridge:
 
     def set_support_contact_probe(self, probe):
         self.support_contact_probe = probe
+
+    # sim-place-release-rest-at-seat-v1: a callable() -> bool reporting whether THIS release's coupling diag
+    # was CLEAN (NativePanelContact.release_diag_clean). None => the packet field stays False => byte-identical.
+    release_diag_clean_probe = None
+
+    def set_release_diag_clean_probe(self, probe):
+        self.release_diag_clean_probe = probe
 
     def _arm_base_from_camera(self):
         import numpy as np
@@ -1492,6 +1508,10 @@ def create(*, app, assembly, plan, config, output, _builder=None):
             # reset the carton-vs-support latch at each weld detach (_release_fallback) so the post-detach
             # free-check window is fresh -- only the FREED carton's rest contact counts.
             contact._support_contact_reset = _pcl.clear_support_contact
+        # sim-place-release-rest-at-seat-v1: feed the clean-release-diag flag onto the /sensors packet for the
+        # host rest-at-seat free proof (independent of the logger; the diag is computed at _release_fallback).
+        if hasattr(contact, 'release_diag_clean'):
+            collect_bridge.set_release_diag_clean_probe(contact.release_diag_clean)
     except Exception as exc:                                       # pragma: no cover - needs a live Isaac
         print('PLACE_CONTACT_LOGGER subscribe skipped (%s)' % exc, flush=True)
 

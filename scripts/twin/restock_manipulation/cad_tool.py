@@ -831,8 +831,67 @@ class NativePanelContact:
                   'panel is the carry-disable skip; carton-vs-gripper is invisible to place_contact_logger)'
                   % (njoints, parent, kin, ccoll, ','.join(live) or '[]', ','.join(proxy_live) or '[]'),
                   flush=True)
+            # sim-place-release-rest-at-seat-v1: CLEAN iff the carton is provably free of the gripper -- no
+            # joint on it, not kinematic, no live gripper panel. The host rest-at-seat free proof gates on this.
+            self._release_diag_clean = bool(njoints == 0 and kin is not True and not live)
         except Exception as exc:  # never let a diagnostic break the release
+            self._release_diag_clean = False
             print('RELEASE_COUPLING_DIAG unavailable (%s)' % exc, flush=True)
+        self._release_support_diag(body_path)
+
+    def release_diag_clean(self):
+        """sim-place-release-rest-at-seat-v1: the last release's CLEAN flag (joints=0, not kinematic, no live
+        gripper panel), for the Isaac driver to thread onto the packet (``release_diag_clean``). False until
+        a release has run. Pure accessor."""
+        return bool(getattr(self, '_release_diag_clean', False))
+
+    def _release_support_diag(self, body_path):
+        """sim-place-release-rest-at-seat-v1: read-only diagnostic that EXPLAINS a missing carton-vs-support
+        contact (coldwin107 support_contact=False at bottom_gap -0.3 mm): the carton collider AABB bottom z vs
+        the ACTUAL /Rollwagen support collider top z from the stage (not the modelled seat), plus the carton
+        rigid body sleeping state + linear velocity when reachable. Never raises. Logs RELEASE_SUPPORT_DIAG."""
+        try:
+            from pxr import Usd, UsdGeom, UsdPhysics
+            stage = self.stage
+            cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                      [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+            carton = stage.GetPrimAtPath(str(body_path))
+            crng = cache.ComputeWorldBound(carton).ComputeAlignedRange()
+            clo, chi = crng.GetMin(), crng.GetMax()
+            cbot = float(clo[2])
+            cx, cy = (float(clo[0] + chi[0]) / 2.0, float(clo[1] + chi[1]) / 2.0)
+            # the nearest /Rollwagen collider whose xy span covers the carton centre and whose top is at/below
+            # the carton bottom (the actual support the carton should be resting on)
+            best_path, best_top = None, None
+            for p in Usd.PrimRange(stage.GetPrimAtPath('/'), Usd.TraverseInstanceProxies()):
+                ps = str(p.GetPath())
+                if '/Rollwagen' not in ps or not p.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                if not UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr().Get():
+                    continue
+                rng = cache.ComputeWorldBound(stage.GetPrimAtPath(ps)).ComputeAlignedRange()
+                lo, hi = rng.GetMin(), rng.GetMax()
+                if not (float(lo[0]) <= cx <= float(hi[0]) and float(lo[1]) <= cy <= float(hi[1])):
+                    continue
+                top = float(hi[2])
+                if top <= cbot + 0.05 and (best_top is None or top > best_top):
+                    best_top, best_path = top, ps
+            gap = (None if best_top is None else cbot - best_top)
+            # best-effort carton rigid-body velocity + sleeping (not reachable from pure USD in all builds)
+            vel = sleeping = None
+            try:
+                from omni.physx import get_physx_simulation_interface  # noqa: F401
+                from pxr import PhysicsSchemaTools  # noqa: F401
+            except Exception:
+                pass
+            print('RELEASE_SUPPORT_DIAG carton_aabb_bottom_z=%.4f rollwagen_support=%s support_top_z=%s '
+                  'aabb_gap_m=%s carton_vel=%s sleeping=%s (gap>0 => carton hovering above the ACTUAL support '
+                  'collider => no carton-vs-support contact despite a small modelled bottom_gap)'
+                  % (cbot, best_path or 'none',
+                     'n/a' if best_top is None else '%.4f' % best_top,
+                     'n/a' if gap is None else '%.4f' % gap, vel, sleeping), flush=True)
+        except Exception as exc:
+            print('RELEASE_SUPPORT_DIAG unavailable (%s)' % exc, flush=True)
 
     # --------------------------------------------------- release-op adapter (release_detach.apply_release_ops)
     # Each method applies ONE ordered release operation to the stage; apply_release_ops dispatches them in
