@@ -204,6 +204,9 @@ def _fake_controller(reapproach_max):
     c._transition = lambda ph: c._transitions.append(ph)
     c._result = lambda: 'HOLD'
     c._fail = lambda r: ('FAIL', r)
+    # sim-motion-active-guard-v1: the re-approach owes a serialized stop of the in-flight descent.
+    c._reapproach_reissue_pending = False
+    c._reissue_reset = lambda: None
     c._obstructed = TransferController._place_obstructed.__get__(c, type(c))
     return c
 
