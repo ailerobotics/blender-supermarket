@@ -622,6 +622,33 @@ Recommended ON values (coldwin94): `docs/examples/place-pad-down-arrival-fragmen
 `scripts/check_place_pad_down_arrival.py`, `scripts/twin/tests/test_place_reorient.py`,
 `scripts/twin/tests/test_place_pad_down_arrival.py`; write-up: `data/sim-place-pad-down-arrival-v1/report.md`.
 
+#### The seat gate is the single release authority, incl. the pad-down descent (sim-seat-gate-pad-down-path-v1)
+
+coldwin98 ran the three-stage set-down cleanly, then released the weld **in mid-air 106 mm above the seat**
+— although `place_seat_gate` was on. **Named cause (dispatch path):** the release gate
+(`_place_release_gate`) observes with `commanded_down=True` on **every** `place` tick, so it also ran during
+the pad-down **reorient** leg (stage b), where the carton centre z is frozen at the standoff (0.6375); after
+`place_release_stall_ticks` frozen ticks the **raw stall trigger** fired a release while `seat_center_z` was
+still **unarmed** (it is set only in the post-reorient descent block, reached after `_place_reoriented`
+latches — which never happened because the release pre-empted the reorient). No `PLACE_SEAT_GATE_ARM` /
+`PLACE_CONTACT_RELEASE_ARM` appears in the cw98 logs. Fixes (unconditional on the existing keys): the
+controller **does not run the gate during the reorient leg** (it only judges the real descent, after the seat
+is armed), and `PlaceReleaseGate(require_seat=place_seat_gate)` **forbids any seat-blind raw release** — a
+trigger with no modelled seat armed HOLDS (`PLACE_OBSTRUCTED`, sentinel `seat-gate-unarmed`), never a release.
+A measured contact farther than `place_seat_tol_m` above the modelled seat is already `PLACE_OBSTRUCTED`
+(hold → bounded re-approach → fail by name), never 'support met'.
+
+The **merged gates (pad-down arrival / cage gates / honest seat gate) are proven only for the upper-shelf
+flat-top seat.** `config_preflight.check_seat_gates_support` refuses, before a boot, a launch that combines
+any of them with `RESTOCK_PLACE_ON_DECK` (the live deck-interior derivation — cw98 aimed ~23 mm below the
+shelf flat top, into the deck region the shelf covers) or a deck support selection; pin the three support-z
+places (runtime/scenario/GT) to the resolved shelf flat top (`RESTOCK_PLACE_SUPPORT_FLAT_TOP=1`, which also
+pins `isaac_factory._deck_place_target` z to that flat top). Byte-identical when the merged gates are off.
+
+Hand-off ON values (coldwin100): `docs/examples/seat-gate-pad-down-path-fragment.json`; CPU proof:
+`scripts/twin/tests/test_sim_seat_gate_pad_down_path_v1.py`; write-up:
+`data/sim-seat-gate-pad-down-path-v1/report.md`.
+
 ## Cage-aware re-grasp off the parked cart + reposition (sim-transfer-regrasp-reposition-v1)
 
 coldwin93 ran the couple, the tow, the uncouple and the park on the GPU for the first time in the campaign, then

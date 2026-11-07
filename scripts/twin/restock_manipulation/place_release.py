@@ -97,7 +97,8 @@ class PlaceReleaseGate:
                  obstruction_gap_mm: float = 2.0, effort_warmup_ticks: int = 3,
                  stall_height_margin_m: Optional[float] = None,
                  seat_center_z: Optional[float] = None,
-                 seat_tol_m: float = _psg.DEFAULT_SEAT_TOL_M):
+                 seat_tol_m: float = _psg.DEFAULT_SEAT_TOL_M,
+                 require_seat: bool = False):
         self.release_z = None if release_z is None else float(release_z)
         self.effort_margin_nm = float(effort_margin_nm)
         self.effort_consecutive = max(1, int(effort_consecutive))
@@ -131,6 +132,15 @@ class PlaceReleaseGate:
         # predicate is twin.restock_manipulation.place_seat_geometry.classify_set_down.
         self.seat_center_z = None if seat_center_z is None else float(seat_center_z)
         self.seat_tol_m = float(seat_tol_m)
+        # sim-seat-gate-pad-down-path-v1: make the honest seat gate the SINGLE release authority. When the
+        # seat gate is the authority (``require_seat`` -- the controller passes ``place_seat_gate``), a
+        # would-be release trigger that fires while NO modelled seat is armed for this descent
+        # (``seat_center_z`` is None) must NEVER release: coldwin98's release gate observed during the PR 380
+        # pad-down REORIENT leg (carton centre z frozen at the standoff), so the raw STALL trigger fired a
+        # SEAT-BLIND release 106 mm above the seat and the carton was let go in mid-air. With ``require_seat``
+        # on, such a trigger is held as an OBSTRUCTION (named ``seat-gate-unarmed``), never 'support met'.
+        # Default off => the legacy raw trigger cascade stands (byte-identical).
+        self.require_seat = bool(require_seat)
         self.reset()
 
     def reset(self, release_z: Optional[float] = ...,  # type: ignore[assignment]
@@ -232,6 +242,29 @@ class PlaceReleaseGate:
                 'descending carton met NON-support body %s (gap=%s mm, stall=%d) -- not pressing/releasing'
                 % (obstruction_prim, 'n/a' if gap is None else '%.2f' % gap, self._stall),
                 z, eff, self._baseline, self._stall, obstruction_prim)
+
+        # --- sim-seat-gate-pad-down-path-v1: the seat gate is the SINGLE release authority. If it is required
+        # (place_seat_gate on) but NO modelled seat is armed for THIS descent (seat_center_z unset), a release
+        # trigger must NEVER fire a seat-blind release -- it could drop the carton anywhere. coldwin98 fired the
+        # raw STALL trigger during the pad-down REORIENT leg (carton centre z frozen at the standoff, 106 mm
+        # above the seat) with seat_center_z still None, and let the carton go in mid-air. HOLD and name it an
+        # OBSTRUCTION (sentinel 'seat-gate-unarmed') so the controller re-approaches bounded / fails by name --
+        # it never presses on, never releases. Inert when require_seat is off OR the seat is armed (the normal
+        # pad-down descent arms the seat before this gate observes a descent). ---
+        if self.require_seat and self.seat_center_z is None:
+            if effort_trigger or stall_trigger or contact_trigger or z_trigger:
+                winning = ('effort' if effort_trigger else 'stall' if stall_trigger
+                           else 'contact' if contact_trigger else 'z')
+                return PlaceReleaseDecision(
+                    'obstructed', None,
+                    'release trigger (%s) fired at carton_z=%s but the honest seat gate (place_seat_gate) is '
+                    'the release authority and NO modelled seat is armed for this descent (seat_center_z '
+                    'unset) -- refusing a seat-blind release that could drop the carton off the seat '
+                    '(coldwin98: a frozen-standoff stall 106 mm above the seat); holding'
+                    % (winning, 'n/a' if z is None else '%.4f' % z),
+                    z, eff, self._baseline, self._stall, 'seat-gate-unarmed')
+            return PlaceReleaseDecision('press', None, 'descending (seat gate required; awaiting seat arm)',
+                                        z, eff, self._baseline, self._stall, None)
 
         # --- sim-place-seat-geometry-v1: the HONEST seat gate (supersedes the raw trigger cascade below
         # when armed). A measured CONTACT (effort / stall / support seal-gap) releases the weld ONLY when
