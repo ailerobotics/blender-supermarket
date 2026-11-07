@@ -821,6 +821,35 @@ class LevelConfig:
     # ``place_seat_geometry.classify_set_down`` (the shared predicate) and docs/examples/place-seat-geometry-fragment.json.
     place_seat_gate: bool = False
     place_seat_tol_m: float = 0.02
+    # sim-place-pad-down-arrival-v1: the opt-in THREE-STAGE set-down that separates the carried APPROACH
+    # from the gripper REORIENTATION. coldwin92 proved the last contradiction of the single-standoff design
+    # with both cage gates live: every carry-connected standoff whose carried approach keeps the carton
+    # level ends on the LOW-wrist_2 CARRY branch, whose straight place descent rakes the +x mouth posts and
+    # is correctly refused; the only cage-clear descent holds the HIGH-wrist_2 PAD-DOWN branch, which the
+    # carried approach cannot reach level (the fallback tilted the carton 13.96 deg -> CARTON_LEVEL_PLAN_
+    # REJECTED). CPU-proven resolution (data/sim-place-pad-down-arrival-v1): an in-place reorientation
+    # directly over the seat rakes post_2 at EVERY height (the post is tall; raising to clear it degenerates
+    # the level IK), but reorienting in the OPEN APPROACH CORRIDOR -- ``pad_down_arrival_shift_m`` toward the
+    # arm base, ``pad_down_arrival_height_m`` above the seat -- keeps the housing clear of the mouth posts
+    # (at the default 0.20 m / 0.10 m, in the controller gripper_pad_tcp frame: >= +66 mm reorient,
+    # >= +103 mm descent) while the carton stays level (<= 0.04 deg reorient, <= 1.25 deg descent) AND
+    # branch-continuous (reorient wrist step <= 0.080 rad, the soft wrist tracks it) at every cw64-cw92 park.
+    # When on, the collect-deck place runs: (a) carried approach to the
+    # SHIFTED above-shelf standoff on the carry-connected arrival branch (the existing selector, no straight-
+    # descent feasibility requirement); (b) a short, slow, tilt-gated + cage-gated in-place reorientation of
+    # the wrists from the arrival (low wrist_2) orientation to the selected PAD-DOWN (high wrist_2) branch,
+    # carton kept within ``bound_deg`` throughout (``place_reorient``); (c) the PR 376 pad-down descent to
+    # the seat (place_from_above L-path) with the descent cage gate + the PR 375 seat gate for release.
+    # Requires ``place_from_above`` (the L-path returns the pad-down carton over the seat) and the wired
+    # descent cage gate (``_place_descent_cage_gate``; the reorientation refuses by name without a cage
+    # criterion). Default OFF => the single-standoff place is unchanged (byte-identical). The 2.0 deg bound /
+    # grace / carton dims / seat are UNTOUCHED. See place_reorient.py + docs/examples/place-pad-down-arrival-fragment.json.
+    place_pad_down_arrival: bool = False
+    pad_down_arrival_shift_m: float = 0.20
+    pad_down_arrival_height_m: float = 0.10
+    pad_down_reorient_waypoints: int = 12
+    pad_down_reorient_speed: float = 0.04
+    pad_down_reorient_accel: float = 0.08
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -933,6 +962,24 @@ class LevelConfig:
         if self.place_seat_gate and not self.place_release_on_contact:
             raise ValueError('carton_level.place_seat_gate requires place_release_on_contact to be on '
                              '(the honest seat gate arms the contact-gated place release)')
+        # sim-place-pad-down-arrival-v1
+        for nm, v in (('pad_down_arrival_shift_m', self.pad_down_arrival_shift_m),
+                      ('pad_down_arrival_height_m', self.pad_down_arrival_height_m),
+                      ('pad_down_reorient_speed', self.pad_down_reorient_speed),
+                      ('pad_down_reorient_accel', self.pad_down_reorient_accel)):
+            if not (math.isfinite(float(v)) and float(v) > 0):
+                raise ValueError(f'carton_level.{nm} must be a finite positive number')
+        if isinstance(self.pad_down_reorient_waypoints, bool) \
+                or not isinstance(self.pad_down_reorient_waypoints, int) \
+                or self.pad_down_reorient_waypoints < 2:
+            raise ValueError('carton_level.pad_down_reorient_waypoints must be an integer >= 2')
+        if self.place_pad_down_arrival and not self.place_from_above:
+            raise ValueError('carton_level.place_pad_down_arrival requires place_from_above to be on '
+                             '(the L-path descent returns the reoriented pad-down carton over the seat; '
+                             'a straight-line descent from the shifted standoff would rake the cage)')
+        if self.place_pad_down_arrival and not self.level_place:
+            raise ValueError('carton_level.place_pad_down_arrival requires level_place to be on '
+                             '(the three-stage set-down keeps the carton level throughout)')
         # sim-preplace-level-gate-v1
         if not (math.isfinite(self.preplace_gate_bound_deg)
                 and 0 < self.preplace_gate_bound_deg <= self.bound_deg):
@@ -1014,7 +1061,9 @@ def resolve_level_config(spec):
                  'closed_loop_authority_deg', 'closed_loop_rate_deg_per_s', 'closed_loop_gain',
                  'place_contact_gap_m', 'preplace_gate_bound_deg', 'preplace_max_segment_rad',
                  'preplace_approach_speed', 'preplace_approach_accel', 'preplace_max_wrist_step_rad',
-                 'preplace_soft_effort_nm', 'preplace_branch_select_budget_s'):
+                 'preplace_soft_effort_nm', 'preplace_branch_select_budget_s',
+                 'pad_down_arrival_shift_m', 'pad_down_arrival_height_m',
+                 'pad_down_reorient_speed', 'pad_down_reorient_accel'):
         if fnum in spec and spec[fnum] is not None:
             kw[fnum] = float(spec[fnum])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
@@ -1024,7 +1073,7 @@ def resolve_level_config(spec):
                  'preplace_seeded_interior', 'preplace_branch_prefer_carry_connected',
                  'preplace_descent_feasible',
                  'place_release_on_contact', 'release_cancel_handshake', 'release_reissue',
-                 'release_free_check', 'place_seat_gate'):
+                 'release_free_check', 'place_seat_gate', 'place_pad_down_arrival'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     # sim-place-release-on-contact-v1 / sim-place-release-cancel-handshake-v1 / sim-release-open-reissue-v1
@@ -1036,7 +1085,8 @@ def resolve_level_config(spec):
             kw[fnum] = float(spec[fnum])
     for fint in ('place_release_effort_consecutive', 'place_release_stall_ticks', 'place_reapproach_max',
                  'release_cancel_stopped_ticks', 'release_reissue_log_every',
-                 'release_free_settle_ticks', 'release_free_settle_window_ticks'):
+                 'release_free_settle_ticks', 'release_free_settle_window_ticks',
+                 'pad_down_reorient_waypoints'):
         if spec.get(fint) is not None:
             kw[fint] = int(spec[fint])
     if spec.get('place_release_contact_gap_mm') is not None:

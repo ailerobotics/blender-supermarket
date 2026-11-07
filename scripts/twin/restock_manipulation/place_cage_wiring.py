@@ -103,15 +103,20 @@ def build_preplace_cage_gate(block, urdf_path, *, default_xrdf=None):
 
 def build_place_descent_cage_gate(block, urdf_path, *, default_xrdf=None):
     """Build the PR 376 collect place-DESCENT cage-clearance gate ``callable(waypoints)->reject|None`` from a
-    resolved HOST block. Raises on a missing ``cart_pose``."""
+    resolved HOST block, plus the raw min-clearance closure ``callable(waypoints)->metres`` the
+    pad-down-branch selector ranks by (sim-place-pad-down-arrival-v1). Raises on a missing ``cart_pose``."""
     from . import place_clearance as pc
     cart_pose = _require_cart_pose(block, PLACE_DESCENT_CAGE_GATE_KEY)
     xrdf = _resolve_xrdf(urdf_path, block.get('xrdf'), default_xrdf)
     margin = float(block.get('margin', pc.DEFAULT_PLACE_DESCENT_CAGE_MARGIN_M))
+    bodies = _resolve_bodies(block)
+    include = block.get('include')
+    cal = float(block.get('cal_offset_m', 0.0))
     gate = pc.place_descent_cage_clearance_provider(
-        str(urdf_path), xrdf, cart_pose, bodies=_resolve_bodies(block), margin=margin,
-        include=block.get('include'), cal_offset_m=float(block.get('cal_offset_m', 0.0)))
-    return gate, {'xrdf': xrdf, 'margin': margin, 'cart_pose': cart_pose}
+        str(urdf_path), xrdf, cart_pose, bodies=bodies, margin=margin, include=include, cal_offset_m=cal)
+    clearance = pc.place_descent_cage_min_clearance_provider(
+        str(urdf_path), xrdf, cart_pose, bodies=bodies, include=include, cal_offset_m=cal)
+    return gate, clearance, {'xrdf': xrdf, 'margin': margin, 'cart_pose': cart_pose}
 
 
 def wire_place_cage_gates(controller, config, urdf_path, *, default_xrdf=None, log=print):
@@ -139,8 +144,11 @@ def wire_place_cage_gates(controller, config, urdf_path, *, default_xrdf=None, l
 
     desc_block = _coerce_block(config.get(PLACE_DESCENT_CAGE_GATE_KEY), PLACE_DESCENT_CAGE_GATE_KEY)
     if desc_block is not None:
-        gate, meta = build_place_descent_cage_gate(desc_block, urdf_path, default_xrdf=default_xrdf)
+        gate, clearance, meta = build_place_descent_cage_gate(desc_block, urdf_path, default_xrdf=default_xrdf)
         controller._place_descent_cage_gate = gate
+        # sim-place-pad-down-arrival-v1: the raw min-clearance closure the pad-down-branch selector ranks by
+        # (byte-identical when the three-stage set-down is off -- it is only read by the reorientation leg).
+        controller._place_descent_cage_min_clearance = clearance
         armed.append(PLACE_DESCENT_CAGE_GATE_KEY)
         log('PLACE_DESCENT_CAGE_GATE armed margin=%.3f m xrdf=%s cart_pose=%s -- the carry-connected '
             'standoff selector now discards a cage-raking descent branch AND the place-descent dispatch '

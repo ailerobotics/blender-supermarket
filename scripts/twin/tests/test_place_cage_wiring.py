@@ -121,6 +121,24 @@ def test_descent_wiring_installs_hook_that_routes_through_the_sweep(monkeypatch)
     assert 'prim=post_2' in reject
 
 
+def test_descent_wiring_installs_min_clearance_closure(monkeypatch):
+    """sim-place-pad-down-arrival-v1: wiring the descent gate also installs the raw min-clearance closure
+    the pad-down-branch selector ranks by (it exposes the cage margin, not a pass/fail). None off."""
+    records = []
+    monkeypatch.setattr(pc, 'preplace_cage_arm_clearance', _spy_sweep(records))
+    c = _controller()
+    assert c._place_descent_cage_min_clearance is None            # byte-identical off
+    block = {'cart_pose': [0.0, 0.0, 0.0, 0.0], 'collider_boxes': FAKE_BOXES, 'margin': 0.03}
+    wiring.wire_place_cage_gates(c, {'place_descent_cage_gate': block}, '/x/mobile.urdf',
+                                 log=lambda *a, **k: None)
+    assert c._place_descent_cage_min_clearance is not None
+    assert c._place_descent_cage_min_clearance([]) == float('inf')  # no waypoints => no constraint
+    # the spy returns -0.02 for post_2 (a cage body) -> the min non-support clearance is -0.02
+    clr = c._place_descent_cage_min_clearance([[0.0] * 6, [0.1] * 6])
+    assert clr == pytest.approx(-0.02)
+    assert records and records[-1]['include'] == ['post_2']
+
+
 def test_preplace_wiring_installs_hook_that_routes_through_the_sweep(monkeypatch):
     records = []
     monkeypatch.setattr(pc, 'preplace_cage_arm_clearance', _spy_sweep(records))

@@ -727,6 +727,12 @@ class TransferController:
         # (CPU-proven >= 0.10 m vs the carry-wrist branch's -1.9..-33 mm). See
         # data/sim-place-descent-reach-cage-v1 and scripts/check_place_descent_reach.py.
         self._place_descent_cage_gate = None
+        # sim-place-pad-down-arrival-v1: the raw min-clearance closure (callable(waypoints)->metres) the
+        # pad-down-branch selector ranks by, installed alongside _place_descent_cage_gate by
+        # place_cage_wiring. None (default) => the selector ranks by the smallest descent tilt. The whole
+        # three-stage set-down is gated on place_pad_down_arrival; off => these are never read (byte-identical).
+        self._place_descent_cage_min_clearance = None
+        self._place_reoriented = False   # sim-place-pad-down-arrival-v1: pad-down reorientation sub-stage flag
         # sim-preplace-leg2-level-v1: the held chassis attitude during the station place. The collect place
         # pins the base at a non-level parking-brake attitude (chassis_station_pitch_hold_pitch_deg /
         # _roll_deg), so ur_base_link +Z is off world +Z and the shoulder_pan YAW axis is off vertical -- a
@@ -1148,6 +1154,7 @@ class TransferController:
         if self._reactive_arm is not None:   # re-arm the human-aware reactive authority per op
             self._reactive_arm.reset(0.0)
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
+        self._place_reoriented = False   # sim-place-pad-down-arrival-v1: fresh reorient sub-stage per op
         # sim-release-threshold-carton-frame-v1: fresh post-detach free-check sub-state per op.
         self._released_detached = False
         self._rf_stage = 'settle'
@@ -1296,6 +1303,14 @@ class TransferController:
         return (self.collect_place_straight_line
                 and getattr(self, 'operation', None) == 'collect'
                 and not self.cart_cage_place)
+
+    def _pad_down_arrival_on(self):
+        """sim-place-pad-down-arrival-v1: the three-stage set-down (arrival -> pad-down reorientation ->
+        descent) is active for THIS collect-deck place. Requires the carton_level ``place_pad_down_arrival``
+        switch; off / non-collect-deck => False => byte-identical (the single-standoff place runs)."""
+        return (self._carton_level is not None
+                and getattr(self._carton_level, 'place_pad_down_arrival', False)
+                and self._collect_deck_place())
 
     def _place_obstructed(self, now, decision):
         """sim-place-release-on-contact-v1: the descending carton met a NON-support body (a cage post, not
@@ -1473,6 +1488,8 @@ class TransferController:
         self.phase, self.elapsed, self.issued = phase, 0.0, False
         self._staged_retries = 0   # fm358: fresh retry budget per phase
         self._move_deadline_retries = 0   # fm367: fresh deadline-retry budget per phase
+        if phase != 'place':
+            self._place_reoriented = False   # sim-place-pad-down-arrival-v1: fresh reorient sub-stage per place
         # sim-preplace-per-joint-gains-v1: disarm the preplace convergence guard + reset the wrist-first
         # sub-stage when leaving preplace, so a stall window is never charged across a phase boundary.
         if phase != 'preplace':
@@ -2003,6 +2020,112 @@ class TransferController:
             round(float(cl_cfg.bound_deg), 9), round(float(cl_cfg.preplace_soft_effort_nm), 9),
         )
 
+    def _issue_pad_down_reorient(self, robot, measured):
+        """sim-place-pad-down-arrival-v1, STAGE (b): the in-place reorientation. At the shifted above-shelf
+        standoff the carried approach left the arm on the carry-connected ARRIVAL branch (low wrist_2);
+        switch it to the PAD-DOWN branch (the reach+level branch whose place-from-above descent to the seat
+        is cage-clear) keeping the carton level throughout, THEN let the descent block (below) run from the
+        pad-down pose.
+
+        The reorientation is a short, slow, tilt-gated + continuity-gated + cage-gated BRANCH-CONTINUOUS
+        leveled waypoint move (``plan_level_world_approach(anchor='seeded')`` -- the carry-wrist arrival and
+        the pad-down branch are distinct wrist-flip IK solutions, so the seeded ramp is required to avoid a
+        branch jump the soft wrist cannot track), swept by the SAME descent cage gate the place dispatch
+        runs. Returns a controller result (the dispatched reorient move, or a named ``_fail``), or
+        ``None`` to fall through to the single-standoff descent (no FK / up-axis / cage gate -- the descent
+        gate then owns a cage-raking set-down). Refuses by name when no pad-down branch is cage-clear or the
+        reorientation itself cannot stay level/clear -- the honest "stage (b) is infeasible here" signal."""
+        from twin.restock_manipulation import carton_level as cl
+        from twin.restock_manipulation import place_reorient as pr
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        if (self._carton_up_in_tool is None or 'place' not in self.poses
+                or self.collect_place_preplace_shape is None):
+            return None
+        # The descent cage gate is the reorientation's cage criterion; without it the pad-down branch cannot
+        # be chosen for clearance, so refuse by name rather than reorient blind into the cage.
+        if self._place_descent_cage_gate is None:
+            return self._fail('PLACE_REORIENT_REJECTED pad-down reorientation needs the place-descent cage '
+                              'gate wired (place_descent_cage_gate) to pick a cage-clear pad-down branch; '
+                              'none is injected -- refusing before motion')
+        cl_cfg = self._carton_level
+        gc = self._place_gravity_compensation()
+        limits = self._place_level_limits() or None
+        tcp_link = self._place_fk_link(robot, list(self.collect_place_preplace_shape))
+        up = self._carton_up_in_tool
+        standoff_tcp = cl.tool_position(robot, list(measured), tcp_link, 'ur_base_link')
+        seat_tcp = tuple(float(c) for c in self.poses['place'][:3])
+        try:
+            pad_down, rep = pr.select_pad_down_branch(
+                robot, standoff_tcp, up, list(self.collect_place_preplace_shape), seat_tcp=seat_tcp,
+                limits=limits, gravity_comp=gc, bound_deg=cl_cfg.bound_deg, tool_link=tcp_link,
+                descent_waypoints=cl_cfg.path_waypoints, approach_from_above=cl_cfg.place_from_above,
+                above_clearance_m=cl_cfg.place_above_clearance_m, depth_bias_m=cl_cfg.place_depth_bias_m,
+                descent_cage_gate=self._place_descent_cage_gate,
+                descent_cage_clearance=self._place_descent_cage_min_clearance)
+        except ValueError as exc:
+            return self._fail('PLACE_REORIENT_REJECTED no cage-clear pad-down branch at the shifted standoff '
+                              '(propose the next lever -- a different pad geometry / side-mouth insertion): '
+                              '%s' % exc)
+        pad_down_vec = [float(pad_down[j]) for j in ARM_JOINTS]
+        # Plan the reorientation measured(arrival) -> pad-down as a BRANCH-CONTINUOUS, DENSIFIED, leveled
+        # waypoint path (the SAME seeded planner the pre-place leg-2 uses -- sim-preplace-approach-seeded-v1).
+        # The carry-wrist arrival and the pad-down branch are distinct wrist-flip IK solutions; a per-waypoint
+        # INDEPENDENT re-leveler (plan_level_path_to_goal) keeps the carton level but bridges them with a
+        # discontinuous ~1.5 rad wrist jump the soft wrist cannot track. The seeded solve ramps wrist_2
+        # MONOTONICALLY from the arrival to the pad-down branch, seeded from the start->standoff interpolation
+        # and warm-continuous from the previous waypoint, densifying locally so every per-waypoint wrist step
+        # stays <= preplace_max_wrist_step_rad AND the carton stays level -- CPU-proven 0.102 rad / 0.04 deg.
+        try:
+            plan = cl.plan_level_world_approach(
+                robot, list(measured), pad_down_vec, up, level_joints=cl_cfg.joints, tool_link=tcp_link,
+                limits=limits, bound_deg=cl_cfg.bound_deg, max_segment_rad=cl_cfg.preplace_max_segment_rad,
+                max_wrist_step_rad=cl_cfg.preplace_max_wrist_step_rad, anchor='seeded',
+                level_accept_deg=cl_cfg.bound_deg, fast=True)
+        except ValueError as exc:
+            return self._fail('PLACE_REORIENT_REJECTED pad-down reorientation has no leveled waypoint path '
+                              'from the arrival pose: %s' % exc)
+        reject = plan.reject(cl_cfg.bound_deg)
+        if reject is not None:
+            print(reject, flush=True)
+            return self._fail('PLACE_REORIENT_REJECTED ' + reject)
+        # Continuity gate (the same soft-wrist branch-jump threshold the pre-place leg-2 uses): a reorientation
+        # with a per-waypoint wrist step > preplace_max_wrist_step_rad is a branch jump the soft wrist cannot
+        # track -- refuse before motion rather than stream it into a tracking fault. The seeded planner
+        # densifies to meet the clamp; only a genuine branch gap leaves a step over it (the honest "stage (b)
+        # is infeasible here" signal -> the next lever).
+        step_reject = plan.reject_wrist_step(cl_cfg.preplace_max_wrist_step_rad, level_joints=cl_cfg.joints)
+        if step_reject is not None:
+            print(step_reject, flush=True)
+            return self._fail('PLACE_REORIENT_REJECTED ' + step_reject)
+        waypoints = [list(w) for w in plan.waypoints]
+        try:
+            cage_reject = self._place_descent_cage_gate(waypoints)
+        except Exception as exc:                       # a provider error must never crash the op
+            cage_reject = None
+            print('PLACE_REORIENT cage sweep skipped (provider error: %s)' % exc, flush=True)
+        if cage_reject is not None:
+            print(cage_reject, flush=True)
+            return self._fail('PLACE_REORIENT_REJECTED the in-place reorientation would drive a gripper link '
+                              'into a Rollwagen cage body: ' + cage_reject)
+        self._carton_seg_planned['place'] = (plan.max_roll, plan.max_pitch)
+        print('PLACE_REORIENT phase=place n=%d chosen pad-down wrist_2=%.3f descent_clearance=%s '
+              'predicted_max roll=%.2f pitch=%.2f deg (<= bound %.2f) max_wrist_step=%.3f (<= %.3f) -- '
+              'branch-continuous in-place reorientation from the carry-connected arrival branch to the '
+              'cage-clear pad-down branch, carton kept level (sim-place-pad-down-arrival-v1); then the place '
+              'descent to the seat runs from here'
+              % (plan.waypoints_n, rep['chosen_wrist_2'],
+                 ('%.1fmm' % (rep['chosen_descent_clearance_m'] * 1000.0))
+                 if rep.get('chosen_descent_clearance_m') is not None else 'n/a',
+                 plan.max_roll, plan.max_pitch, cl_cfg.bound_deg, plan.max_wrist_step,
+                 cl_cfg.preplace_max_wrist_step_rad), flush=True)
+        self.motion.begin_joint_path(waypoints, list(measured), slow=True,
+                                     goal_tol=0.12, speed=cl_cfg.pad_down_reorient_speed,
+                                     accel=cl_cfg.pad_down_reorient_accel)
+        self.issued = True
+        # NOTE: _place_reoriented is latched in the move-DONE handler (not here), mirroring the wrist-first
+        # sub-leg: the next place dispatch runs the descent only after the reorientation has COMPLETED.
+        return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+
     def _preplace_above_place_goal(self, measured):
         """The collect preplace standoff re-targeted DIRECTLY ABOVE the place load-centre, so the
         from-above vertical descent onto the support is POSITIVE and the welded gripper pad clears the
@@ -2047,7 +2170,21 @@ class TransferController:
         # Prefer the support-aware clearance (the SHELF-correct standoff); else the legacy deck raise.
         clearance = (cl_cfg.preplace_support_clearance() if above_support
                      else float(cl_cfg.preplace_standoff_m))
-        standoff = (float(place[0]), float(place[1]), float(place[2]) + float(clearance))
+        pad_down = self._pad_down_arrival_on()
+        if pad_down:
+            # sim-place-pad-down-arrival-v1: the three-stage set-down arrives at a standoff SHIFTED into the
+            # open approach corridor (``pad_down_arrival_shift_m`` toward the arm base, mouth-out) + raised
+            # ``pad_down_arrival_height_m`` above the seat, so the later in-place reorientation to the
+            # pad-down branch keeps the gripper housing clear of the +x mouth posts (CPU-proven at every cw
+            # park). The carry-connected selector picks the carry-connected ARRIVAL branch here; the straight
+            # descent from THIS arrival branch is NOT required to be cage-feasible (the reorientation leg at
+            # the place phase switches to the pad-down branch before the descent), so the descent predictor is
+            # disabled below in pad-down mode.
+            from twin.restock_manipulation import place_reorient as _pr
+            standoff = _pr.reorient_standoff_tcp(place[:3], cl_cfg.pad_down_arrival_shift_m,
+                                                 cl_cfg.pad_down_arrival_height_m)
+        else:
+            standoff = (float(place[0]), float(place[1]), float(place[2]) + float(clearance))
         self._preplace_standoff_exec_rpy = None
         try:
             gc = self._place_gravity_compensation()
@@ -2092,7 +2229,13 @@ class TransferController:
                             # would tilt the carton past the bound -- not just those the leg-2 continuity gate
                             # rejects -- and chooses deterministically among the descent-feasible ones. Off =>
                             # None => byte-identical (the greedy first-leg-2-accepted choice).
-                            descent_pred = self._preplace_descent_predictor(robot, measured, tcp_link, limits)
+                            # sim-place-pad-down-arrival-v1: in pad-down mode the ARRIVAL branch's straight
+                            # descent is deliberately NOT cage-feasible (the reorientation leg switches to the
+                            # pad-down branch before the descent), so the straight-descent feasibility filter
+                            # is disabled here -- the reorientation + descent gates at the place phase are the
+                            # authority. Off (single-standoff place) => the descent predictor is unchanged.
+                            descent_pred = (None if pad_down
+                                            else self._preplace_descent_predictor(robot, measured, tcp_link, limits))
                             sol, self._preplace_branch_report = cl.select_carry_connected_standoff(
                                 robot, standoff, self._carton_up_in_tool_world,
                                 list(self.collect_place_preplace_shape), list(measured), tool_link=tcp_link,
@@ -2225,8 +2368,10 @@ class TransferController:
             print('PREPLACE_ABOVE_%s_UNSOLVED: %s (falling back to the fixed preplace shape)'
                   % ('SUPPORT' if above_support else 'PLACE', exc), flush=True)
             return None
-        self._preplace_above_mode = 'support' if above_support else 'place'
-        self._preplace_above_clearance = float(clearance)
+        self._preplace_above_mode = ('pad_down' if pad_down
+                                     else ('support' if above_support else 'place'))
+        self._preplace_above_clearance = (float(cl_cfg.pad_down_arrival_height_m) if pad_down
+                                          else float(clearance))
         return tuple(float(sol[j]) for j in ARM_JOINTS)
 
     def _place_fk_link(self, robot, goal):
@@ -3366,14 +3511,22 @@ class TransferController:
                         mode = getattr(self, '_preplace_above_mode', 'place')
                         clr = getattr(self, '_preplace_above_clearance',
                                       self._carton_level.preplace_standoff_m)
-                        print('PREPLACE_ABOVE_%s engaged: collect preplace standoff re-targeted directly '
-                              'above the place load-centre +%.3f m (carton bottom at the resolved support '
-                              'top + clearance) so the from-above descent onto the selected support is '
-                              'positive and the contact release fires at the true support top '
-                              '(sim-place-%s)'
-                              % (mode.upper(), clr,
-                                 'preplace-above-support-v1' if mode == 'support'
-                                 else 'descent-residual-v1'), flush=True)
+                        if mode == 'pad_down':
+                            print('PREPLACE_ABOVE_PAD_DOWN engaged: collect preplace standoff SHIFTED into '
+                                  'the open approach corridor (+%.3f m toward the arm base, mouth-out) and '
+                                  'raised +%.3f m above the seat, on the carry-connected ARRIVAL branch -- '
+                                  'the in-place reorientation to the pad-down branch + the place descent run '
+                                  'at the place phase (sim-place-pad-down-arrival-v1)'
+                                  % (self._carton_level.pad_down_arrival_shift_m, clr), flush=True)
+                        else:
+                            print('PREPLACE_ABOVE_%s engaged: collect preplace standoff re-targeted directly '
+                                  'above the place load-centre +%.3f m (carton bottom at the resolved support '
+                                  'top + clearance) so the from-above descent onto the selected support is '
+                                  'positive and the contact release fires at the true support top '
+                                  '(sim-place-%s)'
+                                  % (mode.upper(), clr,
+                                     'preplace-above-support-v1' if mode == 'support'
+                                     else 'descent-residual-v1'), flush=True)
                     # sim-preplace-per-joint-gains-v1 (fallback, deliverable 3): WRIST-FIRST sequencing. When
                     # on, the FIRST preplace leg drives every joint EXCEPT shoulder_pan to the standoff (the
                     # 1.64 rad wrist_2 sweep + leveling moves happen while pan is HELD at its carry value),
@@ -3516,6 +3669,25 @@ class TransferController:
                                                  straight_line=True)
                     self.issued = True
                     return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                # sim-place-pad-down-arrival-v1, STAGE (b): the in-place reorientation leg. Before the place
+                # descent, when the three-stage set-down is on and we have NOT yet reoriented, switch the arm
+                # from the carry-connected ARRIVAL branch (where the carried approach left it, at the shifted
+                # standoff) to the cage-clear PAD-DOWN branch, keeping the carton level throughout. The next
+                # place tick (now reoriented) runs the descent block below from the pad-down pose. Mirrors the
+                # retreat lift-off-then-fold sub-stage (_retreat_lifted). Off / non-pad-down => never fires
+                # (byte-identical). A reorientation the level/cage gates refuse fails the op BY NAME.
+                if (self.phase == 'place' and self._pad_down_arrival_on()
+                        and not self._place_reoriented
+                        and self._carton_level is not None and self._carton_level.level_place
+                        and self._carton_up_in_tool is not None
+                        and self.collect_place_preplace_shape is not None and 'place' in self.poses):
+                    _robot_pd = self._fk_model()
+                    if _robot_pd is not None:
+                        _reo = self._issue_pad_down_reorient(_robot_pd, s.joint_positions)
+                        if _reo is not None:
+                            return _reo
+                    # FK unavailable: fall through to the single-standoff descent (the descent cage gate
+                    # still refuses a cage-raking set-down by name).
                 # sim-carton-level-place-on-cart-v1: LEVEL place descent for the collect deck place. Lower
                 # the carton onto the SENSED deck slot while keeping it parallel to the ground -- a single
                 # straight-line (PR 268) joint descent from the level standoff to a FULL-arm level IK
@@ -3524,6 +3696,9 @@ class TransferController:
                 # this holds level through set-down (the whole move stays < 0.1 deg off level, CPU-proven).
                 # If no clear level solution reaches the sensed deck, fall through to the existing (unleveled)
                 # straight-line place and let the CARTON_TILT trip own it -- never set down in the air.
+                # sim-place-pad-down-arrival-v1: after the reorientation leg above the measured pose is the
+                # pad-down branch, so this descent (seeded from the leveled standoff shape, wrist_2 ~ 1.66)
+                # holds the pad-down branch and clears the cage -- the descent cage gate below re-verifies it.
                 if (self.phase == 'place' and self._collect_deck_place()
                         and self._carton_level is not None and self._carton_level.level_goals
                         and self._carton_level.level_place and self._carton_up_in_tool is not None
@@ -3893,6 +4068,17 @@ class TransferController:
                     self.issued = False
                     print('PREPLACE_WRIST_FIRST done (wrists at standoff) -> move hold joints to standoff',
                           flush=True)
+                    return self._result()
+                # sim-place-pad-down-arrival-v1: the pad-down REORIENTATION sub-leg just completed (the arm
+                # is now on the cage-clear pad-down branch at the shifted standoff). Do NOT advance to release
+                # -- re-issue the SAME place phase, which now (self._place_reoriented) runs the descent to the
+                # seat from the pad-down pose. Mirrors the wrist-first sub-leg above. Off / non-pad-down =>
+                # never fires (byte-identical).
+                if (self.phase == 'place' and self._pad_down_arrival_on() and not self._place_reoriented):
+                    self._place_reoriented = True
+                    self.issued = False
+                    print('PLACE_REORIENT done (arm at the pad-down branch) -> run the place descent to the '
+                          'seat', flush=True)
                     return self._result()
                 # Contact-feedback descent (firstmate run-202): the step settled. If the seal has NOT
                 # latched and the capped travel is not exhausted, step the contact pose a bit further
