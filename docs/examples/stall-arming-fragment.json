@@ -1,0 +1,43 @@
+{
+  "_comment": "sim-place-descent-stall-false-start-v1 (coldwin103). Arm the place-descent STALL release trigger only once descent progress was EXPECTED, so a render-paced descent-START window is not read as a stall. ON values below are for coldwin103 (progress-lag). Default off (place_release_stall_arming absent) => byte-identical: the coldwin100/101c tick sequence still produces action=obstructed. This fragment deliberately runs the coldwin101c CENTRED seat with PR 385's housing-seat keys OFF, so it isolates the stall-arming change.",
+
+  "_the_problem": "coldwin98/99/100/101b/101c declared the collect set-down OBSTRUCTED ('PLACE_OBSTRUCTED prim=above-modelled-seat', carton bottom +108.8 mm vs the modelled seat) 83 ms / 5 ticks at 60 Hz AFTER move_group dispatched the descent trajectory, with the carton centre z FROZEN at the descent START (0.6397). The dispatched CARTON_LEVEL_PLACE_DESCENT plan (n=12, speed 0.020, accel 0.040 rad/s) has a 3.5 s (cw100) / 21.3 s (cw101c) rest-to-rest FIRST segment -- so the plan CANNOT move the carton the 1 mm stall_eps in 83 ms, and the trajectory had not even begun executing (TRAJ_HOST_START anchored start was in the future). The effort sat at baseline (120.4/120.4 cw100, 122.0/122.0 and 128.7/128.6 cw101c -- no press) and the PR 384 contact logger logged ZERO contacts. The place_release.PlaceReleaseGate STALL trigger was counting a render-paced STARTUP window as a stall; the PR 382 seat gate then read that stall as a measured contact +108.8 mm above the seat and named it OBSTRUCTED. Every one of the run's re-approaches repeated it, exhausting the PR 386 re-approach budget.",
+
+  "_the_fix": "place_release_stall_arming='progress-lag' (preferred): the stall fires only when the MEASURED carton descent lags the dispatched plan's PLANNED descent (place_release.PlannedDescent, built from the same waypoints + place_descent_speed/accel the executor runs) by more than place_release_stall_lag_m for place_release_stall_ticks consecutive ticks. At the descent START the plan expects ~0 descent (deep in its rest-to-rest first segment -- sub-0.1 mm at 83 ms), so a frozen-carton startup window has ~0 lag and never trips; a carton that genuinely stops descending while the plan still expects progress trips by name. The EFFORT trigger (effort over the pre-contact baseline for effort_consecutive ticks) is UNCHANGED, so a genuine descent-start jam -- coldwin68's cage post -- still ends by name through effort or the plan-time cage sweep (PR 376/377/383). The PR 382 seat gate stays the single release authority; no release logic is touched; NO height margin is reintroduced (PR 373's retired place_release_stall_height_margin_m suppressed a REAL contact when the seat was wrong; the seat is correct since PR 375, seat_center_z=0.5308 = support_top 0.4408 + carton half 0.0900).",
+
+  "carton_level": {
+    "_existing": "Keep EVERY coldwin101c carton_level key verbatim (the repo restock_manipulation/ros_host_config.json block): place_release_on_contact:true, place_seat_gate:true, place_pad_down_arrival:true + its deps (place_from_above, level_place implied), gravity_compensation, closed_loop_*, preplace_*, release_*, place_release_effort_margin_nm:100, place_release_effort_consecutive:3, place_release_stall_m:0.001, place_release_stall_ticks:5, place_obstruction_gap_mm:2.0, place_reapproach_max:2, pad_down_* . Only the four keys below are NEW.",
+
+    "place_release_stall_arming": "progress-lag",
+    "_place_release_stall_arming_note": "THE SWITCH. 'progress-lag' arms the stall against the dispatched plan's planned descent. 'descent-begun' is the fallback (arm the legacy no-progress counter only after measured descent >= place_release_stall_begun_m or the ramp grace). Absent/null => the legacy raw no-progress stall (byte-identical with coldwin100/101c). Requires place_release_on_contact (validate + the boot log both name a half-wired config).",
+
+    "place_release_stall_lag_m": 0.003,
+    "_place_release_stall_lag_m_note": "progress-lag threshold (m). The stall fires when the measured carton descent lags the planned descent by more than this for place_release_stall_ticks ticks. 3 mm comfortably clears the sub-0.1 mm planned descent of the 83 ms startup window AND is tight enough that a genuine jam (the plan expects cm of descent, the carton is frozen) trips within a few ticks of the plan ramping. Raise toward the stall_eps (1 mm) for a tighter jam detector; the executor render pacing makes 3 mm the safe default.",
+
+    "place_release_stall_begun_m": 0.002,
+    "_place_release_stall_begun_m_note": "descent-begun arm threshold (m) -- unused by 'progress-lag' except as the fallback when no planned profile reaches the decider. The measured carton must have descended this far from the descent-start z before the legacy no-progress stall arms.",
+
+    "place_release_stall_arm_grace_s": null,
+    "_place_release_stall_arm_grace_s_note": "descent-begun ramp grace (sim seconds). null => the dispatched plan's first rest-to-rest segment duration (3.5 s cw100 / 21.3 s cw101c), so a total start-jam that never moves is still caught after the ramp. Unused by 'progress-lag' (it has the full planned profile).",
+
+    "_housing_seat_OFF": "PR 385's housing-seat keys are LEFT AT THEIR OFF VALUES for coldwin103 (the centred coldwin101c seat, no lip overhang) so this run isolates the stall-arming change:",
+    "place_housing_seat": false,
+    "housing_seat_lip_overhang_m": 0.0,
+    "housing_seat_z_lift_m": 0.0
+  },
+
+  "place_descent_cage_gate": {
+    "_note": "UNCHANGED from coldwin101c -- the SAME wired descent cage gate block (cart_pose + pre-baked collider_boxes). The cage sweep still refuses a descent that would drive a gripper link into a cage body BY NAME before motion; the stall-arming change does not touch it.",
+    "cart_pose": "[keep the coldwin101c 4x4 cart-body -> ur_base_link]",
+    "margin": 0.03,
+    "collider_boxes": "[keep the coldwin101c pre-baked cart-frame AABBs]"
+  },
+
+  "_expected_log": "At boot (controller construction, through ros_host): 'PLACE_STALL_ARMING armed=True mode=progress-lag lag_m=0.0030 begun_m=0.0020 grace_s=auto (...)' and HOST_EFFECTIVE_CONFIG with \"place_release_stall_arming\": \"progress-lag\". At each set-down arm: 'PLACE_STALL_PLAN phase=place arming=progress-lag first_segment_s=3.52 total_descent_m=0.0960 n=13 (...)'. Then the place descent must RUN (repeated 'PLACE_RELEASE_TICK ... action=press' as the carton z DROPS from 0.6397 toward the 0.5308 seat) instead of 'PLACE_OBSTRUCTED prim=above-modelled-seat' 83 ms after dispatch. A genuine jam still ends by name through the effort trigger or the cage sweep.",
+
+  "_cpu_proof": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=scripts python3 -m pytest scripts/twin/tests/test_place_descent_stall_false_start_v1.py (the coldwin100 sequence: arming off => obstructed, arming on => not obstructed/descent continues; a real stall after >= 30 mm => obstructed; a descent-start jam with effort rising => obstructed by effort; the planned-progress source against the real n=12 plan shape; the boot-path wiring + PLACE_STALL_ARMING line).",
+
+  "_bounded_gpu_proof": "Re-run the coldwin101c config with this carton_level block (place_release_stall_arming:progress-lag; everything else unchanged) through scripts/run_mobile_restock.py under /tmp/aile-gpu.lock (HEAVY_MB=2500 for whispr). Watch: at the collect set-down the carton z DESCENDS from 0.6397 toward the 0.5308 seat (no 83 ms PLACE_OBSTRUCTED false start), the PLACE_STALL_ARMING + PLACE_STALL_PLAN lines appear, and the set-down either releases AT the seat or ends by a NAMED effort/cage reason -- never the +108.8 mm startup false stall.",
+
+  "_scope": "Only the place-descent STALL trigger arming. The seat geometry (PR 385 housing seat -- left off here), the PR 382 seat-gate release authority, the post-release push-in (separate lane), the PR 386 re-approach counter, the PR 384 contact logger, the effort trigger, and any watchdog/budget are UNCHANGED. Every switch is opt-in and default-off => a run without place_release_stall_arming is byte-identical with coldwin100/101c."
+}

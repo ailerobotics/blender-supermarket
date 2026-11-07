@@ -39,11 +39,99 @@ from twin.restock_manipulation import place_seat_geometry as _psg
 #: controller need not relay the runtime-resolved support prim.
 DEFAULT_SUPPORT_TOKENS: Tuple[str, ...] = ('shelf', 'deck')
 
+#: The opt-in stall-arming modes (sim-place-descent-stall-false-start-v1). ``None`` => the legacy raw
+#: no-progress stall counter (byte-identical). See :class:`PlaceReleaseGate`.
+STALL_ARMING_MODES: Tuple[str, ...] = ('progress-lag', 'descent-begun')
+
 
 def is_support_hit(prim: str, support_tokens: Sequence[str] = DEFAULT_SUPPORT_TOKENS) -> bool:
     """True when the hit-prim path names the SUPPORT surface (contains a support token). Pure."""
     p = str(prim)
     return any(str(tok) in p for tok in support_tokens)
+
+
+def waypoint_segment_times(waypoints: Sequence[Sequence[float]], *, speed: float = 0.02,
+                           accel: float = 0.04, floor_s: float = 1.0) -> Tuple[float, ...]:
+    """sim-place-descent-stall-false-start-v1: the cumulative time (s) at each waypoint of a collision-off
+    multi-waypoint joint path, reproducing the host executor's rest-to-rest cubic sizing EXACTLY (see
+    ``ros_adapter.SimMotionPort._waypoints_goal``: ``seg = max(1.0, 1.5*dmax/speed, sqrt(6*dmax/accel))``
+    with ``speed``/``accel`` clamped to the conservative ceilings 0.08 / 0.15 rad/s(^2) and ``dmax`` the
+    max per-joint delta over the segment). Returns ``(0.0, t1, t2, ...)`` with one entry per waypoint.
+
+    This is the time ORIGIN the dispatched CARTON_LEVEL_PLACE_DESCENT plan runs on: it lets the pure
+    release decider know how long the plan's first (rest-to-rest ramp-up) segment is, so it can tell a
+    render-paced startup stall (no motion yet expected -- coldwin100: 83 ms into a 3.5 s first segment)
+    from a genuine jam. Pure/CPU (``math`` only); matches the real TRAJ_HOST_PLAN timing of a dispatched
+    plan (asserted against the coldwin100 n=12 plan in the tests)."""
+    sp = min(float(speed), 0.08)
+    ac = min(float(accel), 0.15)
+    if not (math.isfinite(sp) and sp > 0 and math.isfinite(ac) and ac > 0):
+        raise ValueError('waypoint_segment_times needs finite positive speed/accel')
+    wps = [list(float(v) for v in w) for w in waypoints]
+    if len(wps) < 2:
+        raise ValueError('waypoint_segment_times needs at least two waypoints')
+    times = [0.0]
+    t = 0.0
+    for a, b in zip(wps[:-1], wps[1:]):
+        dmax = max((abs(bj - aj) for aj, bj in zip(a, b)), default=0.0)
+        seg = max(float(floor_s), 1.5 * dmax / sp, math.sqrt(6.0 * dmax / ac))
+        t += seg
+        times.append(t)
+    return tuple(times)
+
+
+@dataclass(frozen=True)
+class PlannedDescent:
+    """sim-place-descent-stall-false-start-v1: the PLANNED carton descent (metres below the descent start,
+    ``>= 0``) as a function of elapsed SIM time (s) since the descent trajectory was dispatched, built once
+    per set-down from the dispatched CARTON_LEVEL_PLACE_DESCENT plan.
+
+    ``knot_times`` are the cumulative rest-to-rest segment end times (``waypoint_segment_times``;
+    ``knot_times[0] == 0.0`` at the standoff), ``knot_descents`` the planned carton descent at each waypoint
+    (the TCP-z drop from the standoff -- the welded leveled carton tracks the TCP, so carton descent == TCP
+    drop). :meth:`at` interpolates WITHIN a segment with the executor's own cubic smoothstep
+    (``s(tau)=tau^2*(3-2*tau)``), so the model matches the real trajectory's near-zero early progress: at
+    coldwin100's stall (83 ms into a 3.5 s first segment) the planned descent is sub-0.1 mm -- the measured
+    carton CANNOT have made the 1 mm ``stall_eps`` of progress, so counting that as a stall is a false
+    start. Pure/CPU."""
+    knot_times: Tuple[float, ...]
+    knot_descents: Tuple[float, ...]
+
+    def at(self, elapsed_s: float) -> float:
+        """Planned carton descent (m, ``>= knot_descents[0]``) at ``elapsed_s`` since dispatch. Clamped to
+        the first knot before the trajectory starts and to the last knot after it ends; cubic smoothstep
+        within a segment. Pure."""
+        try:
+            t = float(elapsed_s)
+        except (TypeError, ValueError):
+            return 0.0
+        kt, kd = self.knot_times, self.knot_descents
+        if not kt or not kd or len(kt) != len(kd):
+            return 0.0
+        if not math.isfinite(t) or t <= kt[0]:
+            return float(kd[0])
+        if t >= kt[-1]:
+            return float(kd[-1])
+        for i in range(len(kt) - 1):
+            t0, t1 = float(kt[i]), float(kt[i + 1])
+            if t0 <= t <= t1:
+                span = t1 - t0
+                if span <= 0:
+                    return float(kd[i + 1])
+                tau = (t - t0) / span
+                s = tau * tau * (3.0 - 2.0 * tau)
+                return float(kd[i]) + s * (float(kd[i + 1]) - float(kd[i]))
+        return float(kd[-1])
+
+    @property
+    def total_descent(self) -> float:
+        return float(self.knot_descents[-1]) if self.knot_descents else 0.0
+
+    @property
+    def first_segment_s(self) -> float:
+        """The first (rest-to-rest ramp-up) segment duration -- the natural grace for the descent-begun
+        arming fallback. 0.0 for a degenerate single-knot profile."""
+        return float(self.knot_times[1]) if len(self.knot_times) >= 2 else 0.0
 
 
 @dataclass(frozen=True)
@@ -98,7 +186,9 @@ class PlaceReleaseGate:
                  stall_height_margin_m: Optional[float] = None,
                  seat_center_z: Optional[float] = None,
                  seat_tol_m: float = _psg.DEFAULT_SEAT_TOL_M,
-                 require_seat: bool = False):
+                 require_seat: bool = False,
+                 stall_arming: Optional[str] = None, stall_lag_m: float = 0.003,
+                 stall_begun_m: float = 0.002, stall_arm_grace_s: Optional[float] = None):
         self.release_z = None if release_z is None else float(release_z)
         self.effort_margin_nm = float(effort_margin_nm)
         self.effort_consecutive = max(1, int(effort_consecutive))
@@ -141,24 +231,57 @@ class PlaceReleaseGate:
         # on, such a trigger is held as an OBSTRUCTION (named ``seat-gate-unarmed``), never 'support met'.
         # Default off => the legacy raw trigger cascade stands (byte-identical).
         self.require_seat = bool(require_seat)
+        # sim-place-descent-stall-false-start-v1: the STALL trigger must not count while no descent progress
+        # was yet EXPECTED. ``stall_arming`` selects how the stall counter is armed (None => the legacy raw
+        # no-progress counter, byte-identical):
+        #   * 'progress-lag' (preferred): the stall fires only when the measured carton descent LAGS the
+        #     planned carton descent (from the dispatched plan, see :class:`PlannedDescent`) since dispatch
+        #     by more than ``stall_lag_m`` for ``stall_ticks`` consecutive ticks. At the descent START the
+        #     plan expects ~0 descent (deep in the rest-to-rest first segment -- coldwin100: 83 ms into a
+        #     3.5 s segment => sub-0.1 mm), so a frozen-carton startup window has ~0 lag and never trips; a
+        #     carton that genuinely stops descending while the plan expects progress trips by name.
+        #   * 'descent-begun' (fallback when no planned profile is available at the decider): the legacy
+        #     no-progress counter, but ARMED only after the descent has actually begun (measured descent
+        #     >= ``stall_begun_m`` from the descent-start z) OR a ramp grace (``stall_arm_grace_s``, defaulted
+        #     from the plan's first-segment duration when a profile is supplied) has elapsed since dispatch.
+        # The EFFORT trigger (effort over the pre-contact baseline for ``effort_consecutive`` ticks) is
+        # UNCHANGED either way, so a genuine jam AT the descent start (a cage post, coldwin68) still ends by
+        # name through effort / the plan-time cage sweep. ``stall_lag_m`` / ``stall_begun_m`` are metres.
+        if stall_arming is not None and str(stall_arming) not in STALL_ARMING_MODES:
+            raise ValueError('PlaceReleaseGate stall_arming must be None or one of %s' % (STALL_ARMING_MODES,))
+        self.stall_arming = None if stall_arming is None else str(stall_arming)
+        self.stall_lag_m = float(stall_lag_m)
+        self.stall_begun_m = float(stall_begun_m)
+        self.stall_arm_grace_s = (None if stall_arm_grace_s is None else float(stall_arm_grace_s))
+        self._planned: Optional[PlannedDescent] = None
         self.reset()
 
     def reset(self, release_z: Optional[float] = ...,  # type: ignore[assignment]
-              seat_center_z: Optional[float] = ...) -> None:  # type: ignore[assignment]
+              seat_center_z: Optional[float] = ...,  # type: ignore[assignment]
+              planned: Optional[PlannedDescent] = ...) -> None:  # type: ignore[assignment]
         """Clear the per-descent latches. Pass ``release_z`` to re-arm the z fallback for a new set-down
         (the controller passes the freshly computed threshold); omit it to keep the current one. Pass
         ``seat_center_z`` to re-arm the honest seat gate for the new set-down (the corrected modelled seat
-        carton-centre z); omit it to keep the current one."""
+        carton-centre z); omit it to keep the current one. Pass ``planned`` (a :class:`PlannedDescent` or
+        None) to re-arm the stall-arming plan model for the new descent (sim-place-descent-stall-false-
+        start-v1); omit it to keep the current one."""
         if release_z is not ...:
             self.release_z = None if release_z is None else float(release_z)
         if seat_center_z is not ...:
             self.seat_center_z = None if seat_center_z is None else float(seat_center_z)
+        if planned is not ...:
+            self._planned = planned
         self._ticks = 0
         self._baseline: Optional[float] = None
         self._over = 0
         self._min_z: Optional[float] = None
         self._stall = 0
         self.peak_effort = 0.0
+        # sim-place-descent-stall-false-start-v1: per-descent stall-arming latches.
+        self._start_z: Optional[float] = None   # carton centre z at the first descending tick (dispatch)
+        self._dispatch_now: Optional[float] = None  # sim time of the first descending tick (plan t=0)
+        self._lag = 0                           # consecutive ticks the measured descent lags the plan
+        self._descent_begun = False             # the measured carton has descended >= stall_begun_m
 
     @staticmethod
     def _finite(v) -> Optional[float]:
@@ -178,11 +301,61 @@ class PlaceReleaseGate:
             return True
         return z <= self.release_z + self.stall_height_margin_m
 
+    def _stall_ticks_reached(self, now: float, z: Optional[float],
+                             measured_descent: Optional[float]) -> bool:
+        """sim-place-descent-stall-false-start-v1: whether the stall counter has reached ``stall_ticks``
+        UNDER THE CONFIGURED ARMING. Updates the arming latches (``_lag`` / ``_descent_begun``). Pure.
+
+          * arming is None            => the legacy raw no-progress counter (``_stall >= stall_ticks``),
+                                         byte-identical.
+          * arming is 'progress-lag'  => a progress-lag counter: each descending tick, if the planned
+                                         descent (``_planned.at(elapsed)``) exceeds the measured descent by
+                                         more than ``stall_lag_m`` the lag streak grows, else it resets;
+                                         the stall is reached once the streak hits ``stall_ticks``. Falls
+                                         back to 'descent-begun' when no planned profile is armed.
+          * arming is 'descent-begun' => the legacy no-progress counter, but ARMED only after the descent
+                                         has begun (``measured_descent >= stall_begun_m``) or the ramp grace
+                                         has elapsed since dispatch.
+        """
+        if self.stall_arming == 'progress-lag' and self._planned is not None \
+                and self._dispatch_now is not None:
+            elapsed = max(0.0, float(now) - self._dispatch_now)
+            md = 0.0 if measured_descent is None else max(0.0, float(measured_descent))
+            lag = self._planned.at(elapsed) - md
+            if lag > self.stall_lag_m:
+                self._lag += 1
+            else:
+                self._lag = 0
+            return self._lag >= self.stall_ticks
+        if self.stall_arming in ('descent-begun', 'progress-lag'):
+            # 'descent-begun', or 'progress-lag' with no planned profile available (the documented fallback).
+            if measured_descent is not None and float(measured_descent) >= self.stall_begun_m:
+                self._descent_begun = True
+            grace = self._arm_grace_s()
+            elapsed = (max(0.0, float(now) - self._dispatch_now)
+                       if self._dispatch_now is not None else 0.0)
+            armed = self._descent_begun or (grace is not None and elapsed >= grace)
+            return armed and self._stall >= self.stall_ticks
+        return self._stall >= self.stall_ticks
+
+    def _arm_grace_s(self) -> Optional[float]:
+        """The descent-begun ramp grace (s): the explicit ``stall_arm_grace_s`` when set, else the planned
+        plan's first rest-to-rest segment duration when a profile is armed, else None (no time-based arm --
+        the stall then arms only on measured descent). Pure."""
+        if self.stall_arm_grace_s is not None:
+            return self.stall_arm_grace_s
+        if self._planned is not None:
+            seg = self._planned.first_segment_s
+            return seg if seg > 0 else None
+        return None
+
     def _classify_obstruction(self, seal_gap_mm: Optional[float],
-                              seal_hit_prims: Optional[Sequence[str]]) -> Optional[str]:
+                              seal_hit_prims: Optional[Sequence[str]],
+                              stall_latched: bool) -> Optional[str]:
         """Return the FIRST non-support hit-prim path that is flush under the pad (a real obstruction), or
         None. Flush = a measured seal gap at/below ``obstruction_gap_mm`` OR the descent has already
-        stalled (a blocked carton whose gap reading is absent). Pure; tolerant of None / malformed."""
+        stalled (``stall_latched`` -- the arming-gated stall latch, so a render-paced startup window is not
+        read as a blocked carton). Pure; tolerant of None / malformed."""
         if not seal_hit_prims:
             return None
         non_support = [str(p) for p in seal_hit_prims if p and not is_support_hit(p, self.support_tokens)]
@@ -190,7 +363,7 @@ class PlaceReleaseGate:
             return None
         gap = self._finite(seal_gap_mm)
         flush = gap is not None and gap <= self.obstruction_gap_mm
-        if flush or self._stall >= self.stall_ticks:
+        if flush or stall_latched:
             return non_support[0]
         return None
 
@@ -204,6 +377,13 @@ class PlaceReleaseGate:
             return PlaceReleaseDecision('press', None, 'not in place descent', z, eff, self._baseline,
                                         self._stall, None)
         self._ticks += 1
+        # sim-place-descent-stall-false-start-v1: latch the descent START (plan t=0 + the descent-start
+        # carton z) on the first descending tick, so the stall-arming can measure both elapsed-since-dispatch
+        # and the measured descent from the start. No-op when the arming is off (the latches are unread).
+        if self._dispatch_now is None:
+            self._dispatch_now = float(now)
+        if self._start_z is None and z is not None:
+            self._start_z = z
         # --- effort baseline (pre-contact HOLD effort = running min of the observed effort) + streak ---
         effort_trigger = False
         if eff is not None:
@@ -224,10 +404,16 @@ class PlaceReleaseGate:
                 self._stall = 0
             else:
                 self._stall += 1
-        stall_trigger = (z is not None and self._stall >= self.stall_ticks
-                         and self._stall_is_setdown(z))
+        # sim-place-descent-stall-false-start-v1: the stall latch is ARMED per the opt-in arming mode -- it
+        # must not count while no descent progress was yet EXPECTED (the dispatched plan's rest-to-rest first
+        # segment, coldwin100). ``stall_arming is None`` => this is exactly ``_stall >= stall_ticks`` (byte-
+        # identical). The measured descent is from the latched descent-start carton z.
+        measured_descent = (max(0.0, self._start_z - z)
+                            if (z is not None and self._start_z is not None) else None)
+        stall_latched = self._stall_ticks_reached(now, z, measured_descent)
+        stall_trigger = (z is not None and stall_latched and self._stall_is_setdown(z))
         # --- obstruction: a NON-support body flush under the descending carton (gate on the touched body) ---
-        obstruction_prim = self._classify_obstruction(seal_gap_mm, seal_hit_prims)
+        obstruction_prim = self._classify_obstruction(seal_gap_mm, seal_hit_prims, stall_latched)
         # --- contact: a SUPPORT body at/below the configured seal gap ---
         gap = self._finite(seal_gap_mm)
         contact_trigger = (self.contact_gap_mm is not None and gap is not None

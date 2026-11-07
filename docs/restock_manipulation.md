@@ -726,6 +726,50 @@ Hand-off ON values (coldwin100): `docs/examples/seat-gate-pad-down-path-fragment
 `scripts/twin/tests/test_sim_seat_gate_pad_down_path_v1.py`; write-up:
 `data/sim-seat-gate-pad-down-path-v1/report.md`.
 
+#### The stall must not fire before motion is expected (sim-place-descent-stall-false-start-v1)
+
+With the seat gate armed, coldwin98/99/**100**/101b/101c declared the set-down `PLACE_OBSTRUCTED
+prim=above-modelled-seat` (carton bottom **+108.8 mm**) **83 ms / 5 ticks at 60 Hz** *after* move_group
+dispatched the descent, with the carton centre z **frozen at the descent START** (0.6397). The dispatched
+`CARTON_LEVEL_PLACE_DESCENT` plan (n=12, `place_descent_speed` 0.020, `place_descent_accel` 0.040) has a
+**3.5 s** (cw100) / **21.3 s** (cw101c) rest-to-rest FIRST segment (`TRAJ_HOST_PLAN` `time_from_start`), so
+it **cannot** move the carton the 1 mm `place_release_stall_m` in 83 ms — and `TRAJ_HOST_START anchored
+start` was *in the future* (execution had not begun). The effort was at baseline (no press) and the PR 384
+contact logger logged **zero** contacts. The `place_release.PlaceReleaseGate` **stall** trigger was counting
+a render-paced **startup** window as a stall, and the seat gate read it as a contact above the seat. This is
+the startup-stall class PR 373 (`place_release_stall_height_margin_m`) first hit — but that height margin was
+retired because it suppressed a *real* contact when the seat target was wrong; the seat is **correct** since
+PR 375 (`seat_center_z` 0.5308 = support_top 0.4408 + carton half 0.0900), so the fix must gate the stall on
+**when motion was expected**, not on a height.
+
+The fix (HOST `carton_level.place_release_stall_arming`, opt-in, **default None ⇒ byte-identical** — the
+coldwin100 tick sequence still produces `action=obstructed` when off):
+
+- **`'progress-lag'` (preferred):** the stall fires only when the **measured** carton descent lags the
+  **planned** descent (`place_release.PlannedDescent`, built per set-down from the dispatched waypoints + the
+  executor's rest-to-rest cubic timing — `place_release.waypoint_segment_times`, which reproduces
+  `ros_adapter._waypoints_goal`) by more than `place_release_stall_lag_m` for `place_release_stall_ticks`
+  ticks. At the descent START the plan expects ~0 descent (sub-0.1 mm at 83 ms, deep in the first segment),
+  so a frozen startup window has ~0 lag; a carton that genuinely stops while the plan still expects progress
+  trips by name.
+- **`'descent-begun'` (fallback when no plan profile reaches the decider):** the legacy no-progress counter,
+  armed only after the measured descent ≥ `place_release_stall_begun_m` **or** the ramp grace
+  `place_release_stall_arm_grace_s` (None ⇒ the plan's first-segment duration) has elapsed — so a total
+  start-jam that never moves is still caught after the ramp.
+
+The **effort** trigger (`place_release_effort_margin_nm` over the pre-contact baseline for
+`place_release_effort_consecutive` ticks) is **unchanged**, so a genuine descent-start jam (coldwin68's cage
+post) still ends by name through effort or the plan-time cage sweep (PR 376/377/383). The **PR 382 seat gate
+stays the single release authority** (no release logic touched); **no height margin is reintroduced.** The
+boot path prints `PLACE_STALL_ARMING armed=… mode=…` (and `HOST_EFFECTIVE_CONFIG`
+`place_release_stall_arming`), and each set-down logs `PLACE_STALL_PLAN … first_segment_s=… total_descent_m=…`.
+Hand-off ON values (coldwin103, PR 385 housing-seat keys left OFF — the centred coldwin101c seat):
+`docs/examples/stall-arming-fragment.json`; CPU proof (the coldwin100 replay off⇒obstructed / on⇒descent
+continues, a real stall after ≥30 mm ⇒ obstructed, a descent-start jam with effort rising ⇒ obstructed by
+effort, the planned-progress source against the real n=12 plan shape, config + boot wiring):
+`scripts/twin/tests/test_place_descent_stall_false_start_v1.py`; write-up:
+`data/sim-place-descent-stall-false-start-v1/report.md`.
+
 ## Cage-aware re-grasp off the parked cart + reposition (sim-transfer-regrasp-reposition-v1)
 
 coldwin93 ran the couple, the tow, the uncouple and the park on the GPU for the first time in the campaign, then

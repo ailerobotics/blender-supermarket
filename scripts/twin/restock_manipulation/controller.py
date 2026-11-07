@@ -833,7 +833,25 @@ class TransferController:
                 seat_tol_m=float(getattr(cl, 'place_seat_tol_m', 0.02)),
                 # sim-seat-gate-pad-down-path-v1: when place_seat_gate is the authority, forbid a seat-blind
                 # raw release in ANY descent path -- a trigger with no seat armed holds (coldwin98 fix).
-                require_seat=bool(getattr(cl, 'place_seat_gate', False)))
+                require_seat=bool(getattr(cl, 'place_seat_gate', False)),
+                # sim-place-descent-stall-false-start-v1: arm the stall trigger only once descent progress is
+                # EXPECTED (None => the legacy raw no-progress counter, byte-identical). The per-descent plan
+                # profile is passed at the descent-arm reset below.
+                stall_arming=getattr(cl, 'place_release_stall_arming', None),
+                stall_lag_m=float(getattr(cl, 'place_release_stall_lag_m', 0.003)),
+                stall_begun_m=float(getattr(cl, 'place_release_stall_begun_m', 0.002)),
+                stall_arm_grace_s=(None if getattr(cl, 'place_release_stall_arm_grace_s', None) is None
+                                   else float(cl.place_release_stall_arm_grace_s)))
+            # sim-place-descent-stall-false-start-v1: a NAMED boot line the run worker greps -- proves the
+            # decider was constructed with the stall arming the HOST config requested (the host-vs-runtime
+            # split trap: a key in the wrong file is silently inert). Off => the legacy raw stall (named too).
+            print('PLACE_STALL_ARMING armed=%s mode=%s lag_m=%.4f begun_m=%.4f grace_s=%s '
+                  '(None/legacy => raw no-progress stall; coldwin100 false start-stall fix)'
+                  % (self._place_release_gate.stall_arming is not None,
+                     self._place_release_gate.stall_arming or 'legacy',
+                     self._place_release_gate.stall_lag_m, self._place_release_gate.stall_begun_m,
+                     'auto' if self._place_release_gate.stall_arm_grace_s is None
+                     else '%.3f' % self._place_release_gate.stall_arm_grace_s), flush=True)
         # sim-place-preplace-above-support-v1: which above-place lane re-targeted the collect preplace
         # standoff ('support' | 'place') and its carton-bottom clearance above the resolved support top,
         # set when _preplace_above_place_goal engages (for the engaged-standoff log).
@@ -3970,8 +3988,34 @@ class TransferController:
                             # None -- the descent-independent triggers still fire) and the honest seat (None
                             # unless place_seat_gate armed it above => byte-identical).
                             if self._place_release_gate is not None:
+                                # sim-place-descent-stall-false-start-v1: build the per-descent PLANNED-descent
+                                # model from THIS dispatched plan (the same waypoints + speed/accel the
+                                # executor runs) so the stall arming knows how long the plan's rest-to-rest
+                                # first segment is -- a render-paced descent-START window is then not read as a
+                                # stall (coldwin100). None (arming off / build error) => the raw stall /
+                                # descent-begun fallback => byte-identical when arming is off.
+                                _planned = None
+                                if getattr(self._place_release_gate, 'stall_arming', None) is not None:
+                                    try:
+                                        from twin.restock_manipulation.place_release import PlannedDescent
+                                        _kt, _kd = cl.place_descent_time_knots(
+                                            robot, waypoints, tool_link=tcp_link,
+                                            speed=self._carton_level.place_descent_speed,
+                                            accel=self._carton_level.place_descent_accel)
+                                        _planned = PlannedDescent(tuple(_kt), tuple(_kd))
+                                        print('PLACE_STALL_PLAN phase=place arming=%s first_segment_s=%.3f '
+                                              'total_descent_m=%.4f n=%d (the planned-descent model the stall '
+                                              'arming reads; a descent-START window is sub-mm here)'
+                                              % (self._place_release_gate.stall_arming,
+                                                 _planned.first_segment_s, _planned.total_descent,
+                                                 len(_kt)), flush=True)
+                                    except (ValueError, KeyError) as _pexc:
+                                        print('PLACE_STALL_PLAN disabled: %s (the descent-begun / measured-'
+                                              'descent arm fallback owns it)' % _pexc, flush=True)
+                                        _planned = None
                                 self._place_release_gate.reset(release_z=self._place_contact_release_z,
-                                                               seat_center_z=self._place_seat_center_z)
+                                                               seat_center_z=self._place_seat_center_z,
+                                                               planned=_planned)
                                 self._place_release_log_sim = None
                             if cl_peak is not None:
                                 mr, mp, _ = cl.predict_path_tilt_executed(
