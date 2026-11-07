@@ -516,6 +516,47 @@ Recommended ON values + bounded-GPU acceptance: `docs/examples/preplace-branch-d
 CPU proof: `scripts/twin/tests/test_preplace_branch_descent_feasible_v1.py`;
 write-up: `data/sim-preplace-branch-descent-feasible-v1/report.md`.
 
+#### Reach the seat without the housing catching the cage (sim-place-descent-reach-cage-v1)
+
+coldwin87 reached the pre-place standoff and pressed on, but the arm **jammed ~14 cm above the corrected
+seat** (PR 375's 0.9325 world carton bottom) with the carton resting on nothing, at ~1013 N·m. CPU
+reconstruction of the executed place descent (host-stack `TRAJ_HOST_PLAN`, 13 leveled waypoints, against the
+cuMotion **arm-sphere** model at the real park/cart pose — `scripts/check_place_descent_reach.py`): the
+descent plan starts from the standoff at the **carry** wrist orientation (`wrist_2` ≈ 0.28) and its first leg
+reorients to the place **pad-down** orientation (`wrist_2` ≈ 1.63) **while the gripper housing sits inside the
++x cage mouth**, so the *unfiltered* housing link `cube_without_surface_plates` wedges against the upper side
+bar `side_1_horizontal_6` (and the mouth posts) at the descent **start** — the **only** penetrating config of
+the whole path (−1.9 mm cw87, −13.8 mm cw64, −33.8 mm cw88, −36.4 mm cw89; every other waypoint ≥ +0.10 m).
+`wrist_2` then froze at 0.28 against the 1.63 rad command → `TRAJ_HOST_TRACK_MISS worst_j=4 err=1.30` →
+`PATH_TOLERANCE_VIOLATED`. **Not a reach/joint limit** (the 1.63 rad target and the whole reoriented chain are
+far inside limits and ≥ +0.10 m clear; only the standoff carry-wrist orientation penetrates).
+
+- **Place-descent cage gate** (injected `controller._place_descent_cage_gate`, built by
+  `place_clearance.place_descent_cage_clearance_provider` from the live coupled cart pose + host XRDF, exactly
+  as `controller._preplace_cage_clearance` is injected for the pre-place gate; default `None` ⇒ byte-identical):
+  the **same** cuMotion arm-sphere sweep (`place_clearance.place_descent_cage_clearance` =
+  `preplace_cage_arm_clearance`) over the planned place-descent waypoints vs the cage bodies, at the **30 mm**
+  design margin (the clear descent reads +0.10 m, far outside the CPU-vs-sim noise, so unlike the pre-place
+  sweep's penetration-only 0 mm this gate uses the full margin). It does **two** things: (a) the carry-connected
+  standoff selector's `descent_predictor` (`_preplace_descent_predictor`) now also treats a cage-**raking**
+  descent as infeasible — not just one over the 2.0° tilt bound — so the selector **discards** the carry-wrist
+  branch and advances to the **pad-down** branch whose descent holds the housing clear; and (b) the place-descent
+  dispatch refuses an intersecting descent **by name** before motion (`PLACE_DESCENT_CAGE_CLEARANCE
+  prim=side_1_horizontal_6 min_clearance=… cube_without_surface_plates …`) instead of the blind `wrist_2` jam.
+- **The remedy descent** holds the pad-down branch (`wrist_2` ≈ 1.63) from the standoff to the corrected seat:
+  CPU-proven ≥ +0.10 m from **every** cage body at every collect-place park pose, tilt **1.72°** (≤ the
+  **untouched** 2.0° bound), landing the carton bottom at **0.9325** world. Requires `place_seat_gate` (PR 375)
+  so the descent targets the corrected seat, not the +3.8 cm-too-high model support top.
+
+**Open question — approach feasibility of the pad-down standoff.** The CPU proof certifies the **descent** from
+the pad-down standoff; whether the pre-place **approach** can deliver the arm to that standoff continuously
+(the PR 366/coldwin72 leg-2 tilt-ridge concern) is the pre-place lane's, validated in-sim at coldwin91. If the
+gate still refuses with a residual wedge, the selector could not reach the pad-down branch — see the write-up.
+
+Recommended ON values + bounded-GPU acceptance (coldwin91): `docs/examples/place-descent-reach-fragment.json`;
+CPU proof: `scripts/check_place_descent_reach.py`, `scripts/twin/tests/test_place_descent_reach.py`;
+write-up: `data/sim-place-descent-reach-cage-v1/report.md`.
+
 ## Contact-gated place-descent release (sim-place-release-on-contact-v1)
 
 The collect deck set-down releases the weld the instant the support is **actually touched**, not at a
