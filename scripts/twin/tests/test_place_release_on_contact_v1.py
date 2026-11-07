@@ -231,6 +231,68 @@ def test_obstructed_bounded_reapproach_then_fail():
     assert isinstance(res2, tuple) and res2[0] == 'FAIL'
 
 
+# ------------------------------------- sim-place-reapproach-counter-terminates-v1: counter + named exhaustion
+
+def test_obstructed_counter_advances_across_reapproach_cycles(capsys):
+    """coldwin101b regression: each PLACE_OBSTRUCTED (one per PLACE_REORIENT re-descend cycle) must INCREMENT
+    the re-approach counter, and the log line must show the true n/N -- never stick at 1/N. With the budget
+    held across the whole place stage (not reset per re-descend), two attempts log 1/2 then 2/2."""
+    c = _fake_controller(2)
+    dec = PlaceReleaseDecision('obstructed', None, 'met post', 0.6257, 125, 125, 7, POST)
+    r1 = c._obstructed(0.1, dec)
+    r2 = c._obstructed(0.2, dec)
+    assert r1 == 'HOLD' and r2 == 'HOLD'                            # both under budget -> re-approach (hold)
+    assert c._place_reapproach_count == 2                           # the counter ADVANCED, never reset to 0
+    out = capsys.readouterr().out
+    assert 'bounded lateral re-approach 1/2' in out                # first attempt
+    assert 'bounded lateral re-approach 2/2' in out                # second attempt (the true n/N, not 1/2)
+
+
+def test_obstructed_budget_exhausted_emits_named_event_once(capsys):
+    """When the re-approach budget is spent, the place ends by a DISTINCT named terminal event
+    (PLACE_OBSTRUCTED_BUDGET_EXHAUSTED) exactly once, with the true attempts/budget -- NOT a silent loop that
+    runs on to the re-issue-timeout e-stop. The fail reason carries the same named token so host-stack.log
+    traces it."""
+    c = _fake_controller(2)
+    dec = PlaceReleaseDecision('obstructed', None, 'met post', 0.6257, 125, 125, 7, POST)
+    c._obstructed(0.1, dec)                                         # 1/2
+    c._obstructed(0.2, dec)                                         # 2/2
+    capsys.readouterr()                                            # drop the two re-approach lines
+    res = c._obstructed(0.3, dec)                                  # budget spent -> named terminal fail
+    assert isinstance(res, tuple) and res[0] == 'FAIL'
+    assert 'PLACE_OBSTRUCTED_BUDGET_EXHAUSTED' in res[1] and POST in res[1]
+    out = capsys.readouterr().out
+    assert out.count('PLACE_OBSTRUCTED_BUDGET_EXHAUSTED') == 1     # the named event fires exactly once
+    assert 'attempts=2/2' in out                                  # the true attempts made / budget
+    assert any('place_obstructed_budget_exhausted' in e for e in c.evidence)  # recorded once in evidence
+
+
+def test_obstructed_budget_zero_fails_by_the_named_event_immediately(capsys):
+    """A zero budget still fails by the named terminal event (attempts=0/0) on the first obstruction, never a
+    re-approach -- byte-identical fail decision, now under the distinct name."""
+    c = _fake_controller(0)
+    dec = PlaceReleaseDecision('obstructed', None, 'met post', 0.6257, 125, 125, 7, POST)
+    res = c._obstructed(0.1, dec)
+    assert isinstance(res, tuple) and res[0] == 'FAIL'
+    assert c._transitions == []                                   # no re-approach
+    out = capsys.readouterr().out
+    assert 'PLACE_OBSTRUCTED_BUDGET_EXHAUSTED' in out and 'attempts=0/0' in out
+
+
+def test_obstructed_under_budget_is_unchanged(capsys):
+    """Under budget the re-approach behaviour is unchanged: a HOLD, a lateral shift, a transition to preplace
+    with the re-issue owed, and NO terminal-event token -- the named exhaustion only ever fires at the cap."""
+    c = _fake_controller(3)
+    x0 = c.poses['place'][0]
+    dec = PlaceReleaseDecision('obstructed', None, 'met post', 0.6257, 125, 125, 7, POST)
+    res = c._obstructed(0.1, dec)
+    assert res == 'HOLD' and c._transitions == ['preplace']
+    assert c.poses['place'][0] != x0 and c._reapproach_reissue_pending is True
+    out = capsys.readouterr().out
+    assert 'bounded lateral re-approach 1/3' in out
+    assert 'PLACE_OBSTRUCTED_BUDGET_EXHAUSTED' not in out         # no terminal event under budget
+
+
 # --------------------------------------------------------------------- REPLAY regressions (cw68 / cw64)
 
 # coldwin68 trace: carton frozen at the descent START 0.6257 (NO descent), pad flush on post_2 (gap 0.0),
