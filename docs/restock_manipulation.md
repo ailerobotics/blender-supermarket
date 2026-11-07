@@ -770,6 +770,50 @@ effort, the planned-progress source against the real n=12 plan shape, config + b
 `scripts/twin/tests/test_place_descent_stall_false_start_v1.py`; write-up:
 `data/sim-place-descent-stall-false-start-v1/report.md`.
 
+#### The dispatched descent must descend MONOTONICALLY (sim-place-descent-reach-executed-vs-planned-v1)
+
+With the stall false-start fixed (PR 387), **coldwin103** ran the collect pad-down set-down descent for real for
+the first time since cw98 and it **did not reach the shelf**. CPU forensics (FK with the mission URDF, no Isaac/
+ROS/GPU — `data/sim-place-descent-reach-executed-vs-planned-v1/report.md`) settle two things:
+
+- **The arm TRACKED the plan.** FK of the recorded `CARTON_TICK` joints against the dispatched `TRAJ_HOST_PLAN`
+  at matched elapsed time (anchored start 291.883 s) stays within **0.011 rad per joint**, and FK-of-executed
+  carton centre reproduces the recorded `PLACE_RELEASE_TICK` carton_z to **< 1 mm**. The set-down failure is
+  **not** a tracking failure, a competing command, a joint limit, PR 359 hold-firm, or a mid-way replacement.
+- **The dispatched PLAN does not descend.** Its FK carton-centre z drops 7 mm, then **RISES to +10.6 mm above
+  the standoff** over the first 8 of 13 waypoints (point 6 at t=20.9 s), holding up through point 8 (t=28.1 s),
+  and only dives to the seat in the last 4. The run was declared `PLACE_OBSTRUCTED` at t=28.6 s — at the hump,
+  before the real descent ran. **Cause:** the base `plan_compensated_place_descent` output is monotonic and
+  reaches the seat; the hump is added **after** by the sensor-anchored closed-loop servo
+  (`closed_loop_sensor` → `CartonLevelServo.correct_path_sensor_anchored`), which drives the ±3 deg wrist
+  authority to **saturation** nulling a start-anchored attitude bias and swings the ~0.19 m-laterally-offset
+  welded carton up ~10.7 mm (CPU replay reproduces the dispatched hump desc_mm +7.5/+3.9/+0.3/−3.3/−7.0/−10.7
+  to ~1 mm).
+- **PR 383 reconciliation.** `check_pad_down_shelf_contact.py` claimed the housing −52..−59 mm into the shelf
+  while physics saw `CONTACT_PAIR 0`. Its base-z calibration anchors on `place_clearance._carton_in_base` (the
+  side-grip pad model), which places the carton centre **+124.6 mm** too high in `ur_base` (FK 0.7642 vs the
+  measured `placed_pose` 0.6396), so the calibrated arm base sits that far **too low** and the housing reads
+  deep into the shelf. Anchoring on the **measured** carton centre puts the housing **+75..+94 mm clear at every
+  waypoint cw103 executed (wp0-8)**; only the never-reached deepest wp12 reads −16.8 mm, within the conservative
+  XRDF-sphere + composed-AABB calibration noise. **The physics is right:** cw103 did not reach the shelf because
+  of the hump, not a housing strike.
+
+**Fix** (HOST `carton_level.place_descent_monotonic_z`, default off ⇒ byte-identical): after
+`_closed_loop_correct_descent`, cap the correction's **upward** carton-z excursion back to the monotonic base
+descent (`place_clearance.enforce_monotonic_carton_z`) — each corrected waypoint whose FK carton centre z rises
+above both the running minimum and the base plan's carton z (within `place_descent_monotonic_z_tol_m`, default
+1 mm) is blended toward its base counterpart just enough to restore a monotonic descent to the seat. The cap is
+**one-sided** (a servo correction that lowers the carton toward level is kept) and falls back to the base plan on
+any residual non-monotonicity. CPU-proven: the humped cw103 descent (max rise 10.7 mm, lands +18.9 mm above the
+seat before stalling) → monotonic (max rise 0.0 mm), reaches the seat within 1 mm, tilt back to the base 1.28 deg
+(the servo had pushed it to 3.04 deg). **PR 382's seat gate stays the single release authority and PR 387's stall
+arming is unchanged.** The boot path prints `HOST_EFFECTIVE_CONFIG` `place_descent_monotonic_z`, and each set-down
+logs `PLACE_DESCENT_MONOTONIC_Z phase=place armed mode=… max_rise_before=… max_rise_after=…`. Hand-off ON values
+(coldwin104: stall arming progress-lag ON, contact logger ON, housing seat OFF, include_support OFF):
+`docs/examples/place-descent-monotonic-z-fragment.json`; CPU proof:
+`scripts/twin/tests/test_place_descent_monotonic_z_v1.py`; write-up:
+`data/sim-place-descent-reach-executed-vs-planned-v1/report.md`.
+
 ## Cage-aware re-grasp off the parked cart + reposition (sim-transfer-regrasp-reposition-v1)
 
 coldwin93 ran the couple, the tow, the uncouple and the park on the GPU for the first time in the campaign, then

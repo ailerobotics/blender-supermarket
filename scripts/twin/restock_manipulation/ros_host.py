@@ -570,6 +570,13 @@ def main():
         # legacy raw no-progress stall; the 'PLACE_STALL_ARMING armed' line above carries the thresholds).
         'place_release_stall_arming': (getattr(controller._carton_level, 'place_release_stall_arming', None)
                                        if controller._carton_level is not None else None),
+        # sim-place-descent-reach-executed-vs-planned-v1: whether the monotonic carton-z descent guard is
+        # armed (True => the dispatched descent's FK carton centre z is capped to the monotonic base plan, so
+        # the coldwin103 closed-loop hump cannot defer the real descent past the seat gate; the per-descent
+        # 'PLACE_DESCENT_MONOTONIC_Z armed' line carries the before/after max rise). False => byte-identical.
+        'place_descent_monotonic_z': (controller._carton_level is not None
+                                      and getattr(controller._carton_level,
+                                                  'place_descent_monotonic_z', False)),
     }), flush=True)
     # sim-collision-dt-render-lead-floor-v1: log the DERIVED collision/feedback freshness band once at
     # host start, so every run dir's host-stack.log records the floor/ceiling in force (the future-lead
