@@ -692,7 +692,63 @@ class NativePanelContact:
             _rd.apply_release_ops(ops, self, body_path=body, joint_path=joint_path)
             print('SIM_ATTACH_FALLBACK release body=%s%s'
                   % (body, ' (robust detach)' if robust else ''), flush=True)
+            self._release_coupling_diag(body)
         self._fallback_joint = self._fallback_body = None
+
+    def _release_coupling_diag(self, body_path):
+        """sim-place-release-residual-bind-v1: at the RELEASE, log everything that could still couple the
+        'freed' carton to the gripper -- so a residual bind (coldwin106's 20 mm follow) is NAMED, not left
+        to the carton-vs-cart-filtered place_contact_logger. Default-on, read-only, never raises. Logs:
+        the count of stage joints still targeting the carton (0 => the weld joint is gone), the carton prim
+        PARENT path (a reparent would pose-follow the tool), kinematicEnabled, carton collisionEnabled, and
+        -- the coldwin106 suspect -- the live/proxy state of EVERY tool-side gripper collider: the carry-
+        disable's stage.Traverse() SKIPS instance proxies, so surface_plate/cube panels stay LIVE and, if
+        coincident with the carton face (min_gap 0), give a penetration contact whose friction lifts it."""
+        try:
+            from pxr import Usd, UsdPhysics
+            stage = self.stage
+            cp = str(body_path)
+            carton = stage.GetPrimAtPath(cp)
+            njoints = 0
+            for p in stage.Traverse():
+                if not p.IsA(UsdPhysics.Joint):
+                    continue
+                j = UsdPhysics.Joint(p)
+                tg = []
+                for rel in (j.GetBody0Rel(), j.GetBody1Rel()):
+                    if rel:
+                        tg += [str(t) for t in rel.GetTargets()]
+                if any(cp in t for t in tg):
+                    njoints += 1
+            parent = str(carton.GetParent().GetPath()) if carton and carton.GetParent() else None
+            ka = carton.GetAttribute('physics:kinematicEnabled') if carton else None
+            kin = (bool(ka.Get()) if (ka and ka.IsValid() and ka.HasAuthoredValue()) else None)
+            ccoll = None
+            if carton:
+                states = [bool(UsdPhysics.CollisionAPI(c).GetCollisionEnabledAttr().Get())
+                          for c in Usd.PrimRange(carton) if c.HasAPI(UsdPhysics.CollisionAPI)
+                          and UsdPhysics.CollisionAPI(c).GetCollisionEnabledAttr().Get() is not None]
+                ccoll = (any(states) if states else None)
+            live, proxy_live = [], []
+            for p in Usd.PrimRange(stage.GetPrimAtPath('/'), Usd.TraverseInstanceProxies()):
+                if not p.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                ps = str(p.GetPath())
+                name = next((t for t in TOOL_SIDE_COLLIDERS if ('/' + t) in ps), None)
+                if name is None:
+                    continue
+                v = UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr().Get()
+                if (True if v is None else bool(v)):
+                    live.append(name)
+                    if p.IsInstanceProxy():
+                        proxy_live.append(name)
+            print('RELEASE_COUPLING_DIAG joints_targeting_carton=%d carton_parent=%s kinematic=%s '
+                  'carton_collision=%s gripper_colliders_live=%s instance_proxy_live=%s (a proxy-live '
+                  'panel is the carry-disable skip; carton-vs-gripper is invisible to place_contact_logger)'
+                  % (njoints, parent, kin, ccoll, ','.join(live) or '[]', ','.join(proxy_live) or '[]'),
+                  flush=True)
+        except Exception as exc:  # never let a diagnostic break the release
+            print('RELEASE_COUPLING_DIAG unavailable (%s)' % exc, flush=True)
 
     # --------------------------------------------------- release-op adapter (release_detach.apply_release_ops)
     # Each method applies ONE ordered release operation to the stage; apply_release_ops dispatches them in
