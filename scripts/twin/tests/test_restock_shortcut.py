@@ -221,9 +221,13 @@ class FakeMobile:
         self.spec = SimpleNamespace(manifest=lambda: {'robot_hitch_local': (0.0, 0.0, 0.3),
                                                        'cart_hitch_local': (0.0, 0.0, 0.3)})
         self.parked = 0
+        self.base_brakes = 0
 
     def park(self):
         self.parked += 1
+
+    def engage_base_full_brake(self):
+        self.base_brakes += 1
 
     def coupling_state(self, dock):
         return {'joint_present': False, 'healthy': True}
@@ -287,6 +291,24 @@ class ApplyStartStateTests(unittest.TestCase):
         self.assertEqual(len(assembly.applied), before + 1)
         self.assertFalse(assembly.command_gate.faulted)
         self.assertTrue(np.allclose(assembly.applied[-1][0], 0.1))
+
+    def test_staged_couple_engages_base_brake_so_first_stationary_stage_is_parked(self):
+        # coldwin96: a staged couple_cart start begins with a STATIONARY stage (verify/transfer); the
+        # attach releases the cart brake for towing, so without re-braking the still-settling train drags
+        # the base past the parked window -> 'base moved during stationary operation'. apply_start_state
+        # must leave the train braked; the first drive releases it.
+        assembly = TransferFakeAssembly()
+        config = {'start_at': 'transfer',
+                  'start_state_settle': {'min_settle_s': 0.1, 'window_s': 0.05, 'max_settle_s': 0.5}}
+        apply_start_state(assembly, config, transfer_scenario(), _rigid_prim=FakeRigidPrim)
+        self.assertEqual(assembly.mobile.base_brakes, 1)        # braked once, after the synthetic couple
+
+    def test_staged_couple_park_brake_opt_out(self):
+        assembly = TransferFakeAssembly()
+        config = {'start_at': 'transfer', 'staged_couple_park_brake': False,
+                  'start_state_settle': {'min_settle_s': 0.1, 'window_s': 0.05, 'max_settle_s': 0.5}}
+        apply_start_state(assembly, config, transfer_scenario(), _rigid_prim=FakeRigidPrim)
+        self.assertEqual(assembly.mobile.base_brakes, 0)        # legacy: no post-couple brake
 
 
 class StageIsolationTests(unittest.TestCase):

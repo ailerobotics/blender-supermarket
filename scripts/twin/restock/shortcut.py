@@ -1099,6 +1099,24 @@ def apply_start_state(assembly, config, scenario, *, settle_steps=None, _rigid_p
         # reference-vs-frozen-arm divergence, misread as a clock/self-collision fault). Only the
         # transfer-start shortcut holds the arm (couple start leaves command_gate untouched).
         assembly.command_gate.resume()
+        # sim-verify-staging-dock-jitter-v1 (coldwin96): mobile.attach force-RELEASES the cart brake so
+        # the coupled train is free to TOW -- but a staged couple_cart start begins with a STATIONARY
+        # stage (verify observes the placed carton; transfer picks), not a drive, and the just-coupled
+        # train is still settling (the attach seated it at cart_speed ~0.019, right at the 0.02 gate).
+        # With nothing braked, the residual cart motion drags the (never-braked) base past the runtime
+        # stationary guard's parked window -> 'base moved during stationary operation' at the very first
+        # verify tick. Re-engage the base full brake here (the non-couple branch above brakes the same
+        # way) so the first stationary stage runs on a parked train; the brake is force-released by the
+        # first real drive tick (MobileController.command), so the return tow is unaffected. Opt out with
+        # config['staged_couple_park_brake']=False (default on). Guarded: a minimal test seam without the
+        # brake method is a no-op.
+        if (config or {}).get('staged_couple_park_brake', True):
+            mobile = getattr(assembly, 'mobile', None)
+            if mobile is not None and hasattr(mobile, 'engage_base_full_brake'):
+                mobile.engage_base_full_brake()
+                print('STAGED_COUPLE_PARK_BRAKE engaged: base full brake held after the synthetic '
+                      'couple so the first stationary stage runs parked (released by the first drive)',
+                      flush=True)
     else:
         settle = converge_settle(step=lambda: assembly.world.step(render=False),
                                  sample=_sample, dt=dt, params=params, names=names)
