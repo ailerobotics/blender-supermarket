@@ -745,6 +745,9 @@ class TransferController:
         # three-stage set-down is gated on place_pad_down_arrival; off => these are never read (byte-identical).
         self._place_descent_cage_min_clearance = None
         self._place_reoriented = False   # sim-place-pad-down-arrival-v1: pad-down reorientation sub-stage flag
+        # sim-place-housing-compatible-seat-v1: log the housing-seat transform at most once per place.
+        self._housing_seat_logged = False
+        self._housing_seat_degenerate_logged = False
         # sim-preplace-leg2-level-v1: the held chassis attitude during the station place. The collect place
         # pins the base at a non-level parking-brake attitude (chassis_station_pitch_hold_pitch_deg /
         # _roll_deg), so ur_base_link +Z is off world +Z and the shoulder_pan YAW axis is off vertical -- a
@@ -1170,6 +1173,7 @@ class TransferController:
             self._reactive_arm.reset(0.0)
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
         self._place_reoriented = False   # sim-place-pad-down-arrival-v1: fresh reorient sub-stage per op
+        self._housing_seat_logged = False   # sim-place-housing-compatible-seat-v1: fresh seat log per op
         # sim-release-threshold-carton-frame-v1: fresh post-detach free-check sub-state per op.
         self._released_detached = False
         self._rf_stage = 'settle'
@@ -1326,6 +1330,56 @@ class TransferController:
         return (self._carton_level is not None
                 and getattr(self._carton_level, 'place_pad_down_arrival', False)
                 and self._collect_deck_place())
+
+    def _housing_seat_tcp(self, seat_tcp):
+        """sim-place-housing-compatible-seat-v1: transform the pad-down place seat for the side-grip
+        suction HOUSING, when ``carton_level.place_housing_seat`` is on (and the three-stage pad-down
+        arrival is active). Two independent corrections, both read by the branch selector
+        (:meth:`_issue_pad_down_reorient`) AND the place descent (so the pins and the descent agree):
+
+          * RAISE the seat z by ``housing_seat_z_lift_m`` (PR 383: the recorded descent over-drove toward
+            the author_cart BOX-MODEL shelf top 0.9325 world while the run pins the COMPOSED flat top
+            0.9639; a lift of the 0.0314 gap makes the descent target the pinned/composed flat top), and
+          * SHIFT the seat toward the +x shelf lip (``place_reorient.mouth_out_unit``) by
+            ``housing_seat_lip_overhang_m`` so the gripper housing hangs OUTBOARD of the shelf board.
+
+        Off / not pad-down / no overhang+lift => ``seat_tcp`` unchanged (byte-identical). Preserves any
+        orientation tail beyond the first three position components. Pure (the mouth-out direction is
+        derived from the seat xy; a degenerate seat at the base origin leaves the shift off, logged once)."""
+        cl = self._carton_level
+        if (cl is None or not getattr(cl, 'place_housing_seat', False)
+                or not self._pad_down_arrival_on()):
+            return seat_tcp
+        overhang = float(getattr(cl, 'housing_seat_lip_overhang_m', 0.0) or 0.0)
+        lift = float(getattr(cl, 'housing_seat_z_lift_m', 0.0) or 0.0)
+        if overhang == 0.0 and lift == 0.0:
+            return seat_tcp
+        seat = [float(c) for c in seat_tcp[:3]]
+        if overhang:
+            from twin.restock_manipulation.place_reorient import mouth_out_unit
+            try:
+                d = mouth_out_unit(seat)
+            except ValueError:
+                d = None
+                if not getattr(self, '_housing_seat_degenerate_logged', False):
+                    print('PLACE_HOUSING_SEAT lip overhang skipped: the place seat tool-origin xy is at the '
+                          'arm base origin, so no mouth-out direction is defined (seat z-lift still applies)',
+                          flush=True)
+                    self._housing_seat_degenerate_logged = True
+            if d is not None:
+                seat[0] += d[0] * overhang
+                seat[1] += d[1] * overhang
+                seat[2] += d[2] * overhang
+        seat[2] += lift
+        out = tuple(seat) + tuple(float(c) for c in seat_tcp[3:])
+        if not getattr(self, '_housing_seat_logged', False):
+            print('PLACE_HOUSING_SEAT phase=%s overhang=%.4f m (mouth-out toward the +x shelf lip) '
+                  'z_lift=%.4f m -> seat %s -> %s (sim-place-housing-compatible-seat-v1: the pad-down '
+                  'branch selector + the place descent now target this housing-compatible seat)'
+                  % (self.phase, overhang, lift, tuple(round(float(c), 4) for c in seat_tcp[:3]),
+                     tuple(round(c, 4) for c in seat[:3])), flush=True)
+            self._housing_seat_logged = True
+        return out
 
     def _place_obstructed(self, now, decision):
         """sim-place-release-on-contact-v1: the descending carton met a NON-support body (a cage post, not
@@ -2077,7 +2131,11 @@ class TransferController:
         tcp_link = self._place_fk_link(robot, list(self.collect_place_preplace_shape))
         up = self._carton_up_in_tool
         standoff_tcp = cl.tool_position(robot, list(measured), tcp_link, 'ur_base_link')
-        seat_tcp = tuple(float(c) for c in self.poses['place'][:3])
+        # sim-place-housing-compatible-seat-v1: the branch selector ranks pad-down branches by their
+        # descent to the SEAT, so the housing-compatible seat (mouth-out lip overhang + z-lift to the
+        # pinned composed flat top) must be applied HERE too, not only at the descent dispatch, so the
+        # chosen branch and the descent agree. Off => unchanged (byte-identical).
+        seat_tcp = self._housing_seat_tcp(tuple(float(c) for c in self.poses['place'][:3]))
         try:
             pad_down, rep = pr.select_pad_down_branch(
                 robot, standoff_tcp, up, list(self.collect_place_preplace_shape), seat_tcp=seat_tcp,
@@ -3754,7 +3812,11 @@ class TransferController:
                     robot = self._fk_model()
                     if robot is not None:
                         seed = self._level_place_goal(self.collect_place_preplace_shape, s.joint_positions)
-                        target_pos = tuple(float(c) for c in self.poses['place'][:3])
+                        # sim-place-housing-compatible-seat-v1: lower the carton to the housing-compatible
+                        # seat (mouth-out lip overhang + z-lift to the pinned composed flat top) when
+                        # place_housing_seat is on; off => poses['place'] unchanged (byte-identical). This
+                        # is the SAME transform the pad-down branch selector applied, so both agree.
+                        target_pos = self._housing_seat_tcp(tuple(float(c) for c in self.poses['place'][:3]))
                         try:
                             # sim-carton-level-place-descent-v1: PER-POINT wrist-compensated level set-down.
                             # coldwin34 ran carton_level:true => gravity_compensation None, so the place

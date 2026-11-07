@@ -132,6 +132,37 @@ def build_place_descent_cage_gate(block, urdf_path, *, default_xrdf=None):
                              'include_support': include_support}
 
 
+def wire_housing_seat(controller, *, log=print):
+    """sim-place-housing-compatible-seat-v1: prove the housing-compatible pad-down seat transform is
+    LIVE at boot, and log a named ``PLACE_HOUSING_SEAT armed`` line the run worker greps before trusting
+    the fragment. The transform itself rides the resolved ``carton_level`` the controller already holds
+    (``place_housing_seat`` + ``housing_seat_lip_overhang_m`` + ``housing_seat_z_lift_m``) and is applied
+    by ``controller._housing_seat_tcp`` at BOTH the pad-down branch selector and the place descent; this
+    function only asserts it is armed and logs it (so the boot path, not just a unit test, exercises the
+    switch). Returns ``True`` when armed, ``False`` otherwise (absent => byte-identical, no log).
+
+    Raises ``ValueError`` (loud, never silent) when ``place_housing_seat`` is on but the three-stage
+    pad-down arrival it transforms is NOT -- exactly the ``LevelConfig.validate`` invariant, re-checked at
+    the boot seam so a mis-set fragment can never leave the seat transform half-wired."""
+    cl = getattr(controller, '_carton_level', None)
+    if cl is None or not getattr(cl, 'place_housing_seat', False):
+        return False
+    if not getattr(cl, 'place_pad_down_arrival', False):
+        raise ValueError('place_housing_seat is on but place_pad_down_arrival is off: the housing-seat '
+                         'transform has no pad-down seat to correct (set carton_level.place_pad_down_arrival '
+                         'true, or place_housing_seat false)')
+    overhang = float(getattr(cl, 'housing_seat_lip_overhang_m', 0.0) or 0.0)
+    lift = float(getattr(cl, 'housing_seat_z_lift_m', 0.0) or 0.0)
+    log('PLACE_HOUSING_SEAT armed lip_overhang=%.4f m (mouth-out toward the +x shelf lip) z_lift=%.4f m -- '
+        'the pad-down branch selector AND the place descent now target a side-grip-housing-compatible seat '
+        '(sim-place-housing-compatible-seat-v1): z_lift raises the carton onto the pinned COMPOSED shelf '
+        'flat top (0.9639) instead of the author_cart BOX-MODEL top (0.9325) so the pins and the descent '
+        'agree, and lip_overhang hangs the gripper housing outboard of the shelf board. CPU proof + the '
+        'housing-clearance-vs-CoM tradeoff: scripts/check_housing_seat_descent.py' % (overhang, lift),
+        flush=True)
+    return True
+
+
 def wire_place_cage_gates(controller, config, urdf_path, *, default_xrdf=None, log=print):
     """Install the cart cage-clearance providers on ``controller`` from the HOST ``config`` blocks
     (sim-place-descent-reach-wire-v1). Opt-in + byte-identical off: a gate is wired only when its HOST
