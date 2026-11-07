@@ -215,6 +215,12 @@ def mission_modes(config):
     # (sim-robust-vram-headroom-default-on-v1), so this is {} only when explicitly opted out (false).
     from .vram_headroom import summary_fields as _vram_fields
     modes.update(_vram_fields(config))
+    # sim-transfer-vram-preshed-v1: the transfer-entry pre-shed + planner/render spike guard (both DEFAULT
+    # OFF, so {} unless explicitly enabled).
+    from .transfer_preshed import summary_fields as _preshed_fields
+    modes.update(_preshed_fields(config))
+    from .spike_guard import summary_fields as _spike_guard_fields
+    modes.update(_spike_guard_fields(config))
     return modes
 
 

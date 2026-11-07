@@ -1461,6 +1461,31 @@ class RosMotionPort:
             return 'wall'
         return None
 
+    def _spike_guard_allows(self, what):
+        """sim-transfer-vram-preshed-v1: pause before a cuMotion plan retry while free VRAM is below the
+        spike-guard floor, so a retry never allocates into a near-full card (the cw93 SIGSEGV). Returns
+        True to proceed (DEFAULT: the guard is OFF unless RESTOCK_TRANSFER_SPIKE_GUARD=1, or the sampler is
+        unavailable, or free is already clear / recovered) and False only when free stayed below the floor
+        for the whole bounded wait -- the caller then fails the plan by name. Lazily built + cached; the
+        disabled guard proceeds without reading VRAM, so a run without the env knob is byte-identical."""
+        guard = getattr(self, '_spike_guard', None)
+        if guard is None:
+            try:
+                from twin.restock import spike_guard as _sg
+                from twin.restock import vram_headroom as _vram
+            except Exception:  # noqa: BLE001 -- never let the guard wiring break a plan retry
+                guard = False
+            else:
+                guard = _sg.from_env()
+                self._spike_guard_sampler = _vram.nvml_sampler() if guard.active else None
+            self._spike_guard = guard
+        if not guard or not getattr(guard, 'active', False):
+            return True
+        decision = guard.wait_for_headroom(
+            getattr(self, '_spike_guard_sampler', None), what=what,
+            log=lambda line: print(line, flush=True))
+        return bool(decision.proceed)
+
     def planning_wall_exceeded(self):
         """True once a single move's TOTAL planning budget is exhausted in a PLANNING phase (ik / plan
         request / plan result) WITHOUT a usable result yet. Read-only (no state advance): the bridge
@@ -2147,6 +2172,12 @@ class RosMotionPort:
                     raise RuntimeError('planning failed (plan attempt cap)')
                 if _should_replan(self._replan_attempts, getattr(self, '_plan_goal', None) is not None,
                                   getattr(self, '_plan_goal_joint_space', False)):
+                    # sim-transfer-vram-preshed-v1: BEFORE dispatching another cuMotion plan retry, pause
+                    # while free VRAM is below the spike-guard floor instead of letting the retry allocate
+                    # a ~1.35 GB working set into a near-full card (the cw93 SIGSEGV). Opt-in via env
+                    # (RESTOCK_TRANSFER_SPIKE_GUARD=1); inactive => proceeds immediately => byte-identical.
+                    if not self._spike_guard_allows('cuMotion plan retry'):
+                        raise RuntimeError('planning failed (vram spike guard: free VRAM did not recover)')
                     self._replan_attempts += 1
                     self._arm_plan_deadline()   # fresh sim-clock planning budget per retry (render-pacing tolerant)
                     self._send(self.plan, self._plan_goal, 'plan_accept')

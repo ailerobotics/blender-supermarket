@@ -563,6 +563,33 @@ coldhonest completed the full cold cycle *with* the arm feed by widening those. 
 `docs/examples/masked-depth-economy-mission-fragment.json`. CPU tests:
 `scripts/twin/tests/test_masked_depth_economy.py`.
 
+### Transfer-stage budget + pre-shed (sim-transfer-vram-preshed-v1)
+
+The feed-only `gpu_budget.check_budget` is **not** sufficient for the live_pose TRANSFER stage:
+coldwin93 entered transfer with the station decode cameras **and** the collect-workspace ESDF
+bounds still resident (117 MiB free), and the ten `PLANNING_FAILED` cuMotion retries then
+allocated a ~1.35 GB working set into that sliver → 13.1 GB → native SIGSEGV. Three pieces fix it:
+
+- **`gpu_budget.check_transfer_budget(config, *, preshed, spike_guard)`** models the transfer as it
+  actually runs — the lean mission base + the arm feed + (unless `preshed` releases them) the mast
+  feed, the decode/source/cart cameras and the collect ESDF bounds, **plus** the planner-retry
+  working set (full unless `spike_guard` pauses the retries). It **refuses** a config whose predicted
+  peak exceeds **card − 1 GB** (`TRANSFER_PEAK_MARGIN_MIB`). The cw93 config is refused without the
+  mitigation and accepted with pre-shed + spike guard (`test_gpu_budget.py`). CLI:
+  `python3 -m twin.restock.gpu_budget --transfer --preshed --spike-guard <config.json>`.
+- **`transfer_preshed`** (opt-in HOST/RUNTIME key, default off) fires on transfer entry — before the
+  second full-res (arm) render boots — a fixed named sequence (`mast_feed → decode_economy →
+  collect_capture → collect_esdf_bounds`), logs `VRAM_PRESHED` with before/after free, and REQUIRES
+  ≥ 1.5 GB free (`min_free_mib`) or fails the run by name. Wired via `transfer_vram_wiring`; a shed
+  with no runtime seam this run is skipped (the economy/ESDF levers are also boot-time). Pure policy:
+  `scripts/twin/restock/transfer_preshed.py`, tested in `test_transfer_vram_preshed.py` /
+  `test_transfer_vram_wiring.py`.
+- **`transfer_spike_guard`** (opt-in key, or env `RESTOCK_TRANSFER_SPIKE_GUARD=1` on the host) pauses
+  a cuMotion plan retry (and any new render) while free VRAM is below `floor_mib` (400), polling a
+  bounded wait and failing by name if it does not recover — so the retries never spike the allocator.
+
+Enable both with `docs/examples/transfer-vram-preshed-fragment.json` (merge into a live_pose config).
+
 ## Cold-collect grasp confirmation (run-327/328) — named cause
 
 Cold runs fail at **collect**: the fixed `source` camera capture cycles `missing, moving,
