@@ -76,13 +76,21 @@ class ReleaseFreeGate:
     """
 
     def __init__(self, *, settle_ticks: int = 5, stable_eps_m: float = 0.005, rest_gap_m: float = 0.03,
-                 settle_window_ticks: int = 60, lift_dz_m: float = 0.06, follow_frac: float = 0.5):
+                 settle_window_ticks: int = 60, lift_dz_m: float = 0.06, follow_frac: float = 0.5,
+                 coupled_abort_m: Optional[float] = None):
         self.settle_ticks = max(1, int(settle_ticks))
         self.stable_eps_m = float(stable_eps_m)
         self.rest_gap_m = float(rest_gap_m)
         self.settle_window_ticks = max(self.settle_ticks, int(settle_window_ticks))
         self.lift_dz_m = float(lift_dz_m)
         self.follow_frac = float(follow_frac)
+        # sim-place-release-carton-stays-v1 (opt-in; None => off => byte-identical): the PER-TICK coupled-rise
+        # abort threshold. The follow() verdict at lift COMPLETION caught coldwin105's persistent weld only
+        # after the carton had risen 0.1494 m with the gripper (then the arm lost its heartbeat on the
+        # re-begin). When set, :meth:`rising_with_gripper` is polled EACH tick of the clearance lift and
+        # refuses the instant the carton rises past this threshold -- naming the still-coupled carton early
+        # and non-destructively, before the lateral retreat, instead of after the full destructive swing.
+        self.coupled_abort_m = None if coupled_abort_m is None else float(coupled_abort_m)
         if not (math.isfinite(self.stable_eps_m) and self.stable_eps_m > 0):
             raise ValueError('release_free_stable_eps_m must be a finite positive number of metres')
         if not (math.isfinite(self.rest_gap_m) and self.rest_gap_m > 0):
@@ -91,6 +99,9 @@ class ReleaseFreeGate:
             raise ValueError('release_free_lift_dz_m must be a finite positive number of metres')
         if not (math.isfinite(self.follow_frac) and 0 < self.follow_frac <= 1.0):
             raise ValueError('release_free_follow_frac must be a finite number in (0, 1]')
+        if self.coupled_abort_m is not None and not (math.isfinite(self.coupled_abort_m)
+                                                     and self.coupled_abort_m > 0):
+            raise ValueError('release_free_coupled_abort_m must be a finite positive number of metres or None')
         self.reset()
 
     def reset(self) -> None:
@@ -140,6 +151,30 @@ class ReleaseFreeGate:
             'holding for the carton to come to rest (bottom_gap=%s m, resting=%s stable_streak=%d/%d)'
             % ('n/a' if g is None else '%.4f' % g, resting, self._stable, self.settle_ticks),
             self._stable, z, g, None)
+
+    def rising_with_gripper(self, *, carton_z) -> ReleaseFreeDecision:
+        """sim-place-release-carton-stays-v1: the PER-TICK coupled-rise check polled during the clearance
+        lift. Returns ``'refuse'`` (RELEASE_NOT_FREE) the instant the carton has risen past
+        ``coupled_abort_m`` above the lift baseline -- the still-welded-to-the-gripper signature -- else
+        ``'running'`` (keep lifting). Inert (always ``'running'``) when ``coupled_abort_m`` is None or the
+        baseline / carton z is unavailable, so a missing measurement never false-refuses. PURE."""
+        if self.coupled_abort_m is None:
+            return ReleaseFreeDecision('running', 'coupled-rise abort off', self._stable, None, None, None)
+        z = self._finite(carton_z)
+        base = self._finite(self.lift_baseline)
+        if z is None or base is None:
+            return ReleaseFreeDecision('running', 'no measured carton rise yet', self._stable, z, None, None)
+        rise = z - base
+        if rise >= self.coupled_abort_m:
+            return ReleaseFreeDecision(
+                'refuse',
+                'carton rose %.4f m with the gripper during the clearance lift (>= %.3f m abort) -- still '
+                'coupled to the gripper, NOT resting on the support; aborting the lift before the retreat'
+                % (rise, self.coupled_abort_m),
+                self._stable, z, None, rise)
+        return ReleaseFreeDecision(
+            'running', 'carton rise %.4f m within the %.3f m abort -- still lifting'
+            % (rise, self.coupled_abort_m), self._stable, z, None, rise)
 
     def follow(self, *, carton_z) -> ReleaseFreeDecision:
         """Verdict after the vertical clearance lift completed: did the carton follow the gripper up?

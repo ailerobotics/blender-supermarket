@@ -1020,6 +1020,38 @@ proof (the centre-frame threshold at the cw87/83/85/86 numbers, the free-and-res
 following-refusal, OFF byte-identical, controller wiring):
 `scripts/twin/tests/test_release_threshold_carton_frame_v1.py`.
 
+#### The weld must actually DETACH, not just lose its prim (sim-place-release-carton-stays-v1)
+
+coldwin105 — the **first** run whose collect pad-down set-down reached the shelf seat (`carton_z 0.6398 →
+0.5307`, modelled seat 0.5308, `bottom_gap -0.3 mm`) — acknowledged the release end to end (`SIM_ATTACH_FALLBACK
+release`, `RELEASE_CONFIRMED held=False`, `RELEASE_FREE_LIFT` *"carton at rest, stable 5 ticks"*) yet
+`HOST_FAULT_ESTOP phase=release 'RELEASE_NOT_FREE: carton rose 0.1494 m with the gripper on the 0.060 m
+clearance lift'`. **Named mechanism:** `stage.RemovePrim(<gripper>/sim_attach_fallback)` removes the FixedJoint
+**USD prim** (so `read()` → `held=False`) but does **not** drop the joint's **PhysX constraint** at runtime — the
+carton stayed **rigidly welded** to the gripper. Evidence (not a model argument): through the whole clearance
+lift the `SEAL_DIAG` pad→carton gap held `min_gap_mm=0.0` and `pad_vs_surface_deg=0.0` (an exact rigid relative
+pose) while the measured carton **centre** rose 0.1494 m with the arm, and the PR 384 contact logger saw **zero**
+carton-vs-cart contacts for the whole run. The carton collider **was** re-enabled (the seal raycast went from
+`min_gap_mm=None` while welded — collider off, raycast misses it — to `0.48 mm` the tick after release), so the
+carton is not missing a collider; it is still held. `RELEASE_FREE`'s *"at rest"* measured the **weld** holding the
+carton at the modelled seat, **not** the shelf supporting it.
+
+Two opt-in, coordinated fixes (default off ⇒ byte-identical). **(1) Robust ordered detach** (RUNTIME
+`release_detach`, `cad_tool._release_fallback` + the pure `release_detach` planner): re-enable the carton
+collider, **disable the weld joint explicitly** (clear `body0`/`body1` rels + `jointEnabled=False`) **before**
+`RemovePrim` — so PhysX drops the constraint even when a bare prim removal does not re-sync — then make the freed
+carton a **dynamic** body (clear any kinematic flag) and **zero its residual linear/angular velocity**, so it
+settles onto the shelf instead of following the gripper. The tool-side colliders stay **deferred** (restored only
+on the next grasp close, gripper then clear of the carton ⇒ zero-overlap restoration). **(2) Host coupled-rise
+verification** (HOST `carton_level.release_free_coupled_abort_m`): the clearance lift is polled **per tick** and
+fails by name the instant the carton rises past the threshold — naming a still-coupled carton **early and
+non-destructively, before the lateral retreat**, not after the 0.1494 m swing (and the misleading downstream
+arm-heartbeat loss). PR 382's seat gate stays the release **authority**; PR 387/388 are unchanged. Recommended ON
+values + acceptance: `docs/examples/release-detach-carton-stays-fragment.json`; CPU proof (ordered-detach planner,
+`robust_detach_enabled` resolution, the physics-layer dispatch order, the real pxr adapter bodies against a fake
+pxr, the per-tick coupled-rise abort, config wiring): `scripts/twin/tests/test_release_detach_carton_stays_v1.py`.
+Write-up: `data/sim-place-release-carton-stays-v1/report.md`.
+
 ### The physical seat, and the honest seat-gated release (sim-place-seat-geometry-v1)
 
 PR 374's premise above — *"the welded carton rested on the shelf at carton_z 0.6422"* — is **wrong**, and

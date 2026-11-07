@@ -928,7 +928,8 @@ class TransferController:
                 settle_ticks=cl.release_free_settle_ticks, stable_eps_m=cl.release_free_stable_eps_m,
                 rest_gap_m=cl.release_free_rest_gap_m,
                 settle_window_ticks=cl.release_free_settle_window_ticks,
-                lift_dz_m=cl.release_free_lift_dz_m, follow_frac=cl.release_free_follow_frac)
+                lift_dz_m=cl.release_free_lift_dz_m, follow_frac=cl.release_free_follow_frac,
+                coupled_abort_m=getattr(cl, 'release_free_coupled_abort_m', None))
         self._released_detached = False   # a weld detach is confirmed; the free-check sub-state owns retreat
         self._rf_stage = 'settle'         # release_free sub-stage: 'settle' (hold) -> 'lift' -> (proceed/fail)
         # sim-robust-phase-timeout-during-recovery-v1: credit the per-phase timeout clock for the sim time
@@ -2698,6 +2699,13 @@ class TransferController:
             # 'settle': keep holding (no motion issued; the arm keeps its detached pose)
             return self._result()
         # self._rf_stage == 'lift'
+        # sim-place-release-carton-stays-v1: poll the PER-TICK coupled-rise abort BEFORE the motion poll, so a
+        # carton still welded to the gripper is named the instant it rises past the abort threshold -- not
+        # after the full destructive lift (coldwin105's 0.1494 m swing, then the heartbeat loss). Inert
+        # (always 'running') unless release_free_coupled_abort_m is set, so a default run is byte-identical.
+        rdec = gate.rising_with_gripper(carton_z=carton_z)
+        if rdec.action == 'refuse':
+            return self._fail('RELEASE_NOT_FREE: ' + rdec.reason)
         try:
             outcome = self.motion.poll()
         except Exception as exc:  # noqa: BLE001 -- route a raise through the staged retry like other moves
