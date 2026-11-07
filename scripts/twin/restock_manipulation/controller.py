@@ -802,10 +802,13 @@ class TransferController:
         # issued (place_contact_release on + a measured placed_pose). None => the gate is inert (off / no
         # measured carton pose) and the legacy place->level-gate->release owns the set-down.
         self._place_contact_release_z = None
-        # sim-place-release-on-contact-v1: the contact-GATED place-descent release decider + its per-descent
+        # sim-place-release-on-contact-v1: the contact-GATED place-descent release decider + its
         # bounded-lateral-re-approach budget. Constructed only when carton_level.place_release_on_contact is
         # on; None => the legacy fixed-z place_contact_release gate above owns the set-down => byte-identical.
         # The gate is reset (and its z fallback armed) when the place descent is issued (_arm block below).
+        # sim-place-reapproach-counter-terminates-v1: _place_reapproach_count is scoped to the WHOLE place
+        # stage (re-approaches accumulate toward place_reapproach_max) -- it resets once per op in start(),
+        # NOT per re-descend plan.
         self._place_release_gate = None
         self._place_reapproach_count = 0
         self._place_release_log_sim = None     # last PLACE_RELEASE_TICK heartbeat time (throttle)
@@ -1173,6 +1176,12 @@ class TransferController:
             self._reactive_arm.reset(0.0)
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
         self._place_reoriented = False   # sim-place-pad-down-arrival-v1: fresh reorient sub-stage per op
+        # sim-place-reapproach-counter-terminates-v1: the bounded-lateral-re-approach budget is scoped to the
+        # whole place stage, so it resets ONCE here per operation -- NOT on each re-descend plan. The place
+        # re-approach cycle re-plans the descent (preplace -> reorient -> descent) on every attempt; resetting
+        # the counter in that plan block zeroed it each cycle, so the attempt line stuck at "1/N" and the
+        # budget never exhausted (coldwin101b: four PLACE_OBSTRUCTED all "1/2", then a re-issue-timeout e-stop).
+        self._place_reapproach_count = 0
         self._housing_seat_logged = False   # sim-place-housing-compatible-seat-v1: fresh seat log per op
         # sim-release-threshold-carton-frame-v1: fresh post-detach free-check sub-state per op.
         self._released_detached = False
@@ -1418,11 +1427,27 @@ class TransferController:
             self._reissue_reset()
             self._transition('preplace')
             return self._result()
+        # sim-place-reapproach-counter-terminates-v1: the budget is spent (this attempt is beyond
+        # place_reapproach_max, or the target cannot be shifted). End the place by a DISTINCT NAMED terminal
+        # event -- PLACE_OBSTRUCTED_BUDGET_EXHAUSTED -- so host-stack.log names the cause, rather than looping
+        # until a motion re-issue timeout e-stops the robot (coldwin101b). _fail() stops the in-flight descent
+        # and HOLDS the carton (never presses/drops it against the post), and the stage ends through the
+        # existing controller failure path. One line per op (reached once, at exhaustion).
+        used = int(getattr(cl, 'place_reapproach_max', 0))
+        made = max(self._place_reapproach_count - 1, 0)   # re-approaches actually performed before exhaustion
+        print('PLACE_OBSTRUCTED_BUDGET_EXHAUSTED prim=%s phase=place now=%.3f attempts=%d/%d: the descending '
+              'carton kept meeting a non-support body -- the bounded lateral re-approach budget is spent'
+              '%s; failing the set-down by name (never pressing/dropping against it) -- the arm holds the '
+              'carton and the stage ends through the existing failure path'
+              % (prim, now, made, used,
+                 '' if can_shift else ' (no shiftable place target)'), flush=True)
+        self.evidence.append({'place_obstructed_budget_exhausted': {
+            'prim': prim, 'attempts': made, 'budget': used, 'sim_time': float(now)}})
         return self._fail(
-            'PLACE_OBSTRUCTED prim=%s: the descending carton met a non-support body (not %s) -- not pressing '
-            '(would jam/drop against it) and the lateral re-approach budget (%d) is exhausted; %s'
-            % (prim, list(getattr(cl, 'place_support_tokens', ('shelf', 'deck'))),
-               int(getattr(cl, 'place_reapproach_max', 0)), decision.reason))
+            'PLACE_OBSTRUCTED_BUDGET_EXHAUSTED prim=%s: the descending carton met a non-support body (not %s) '
+            '-- not pressing (would jam/drop against it) and the lateral re-approach budget (%d) is exhausted; '
+            '%s' % (prim, list(getattr(cl, 'place_support_tokens', ('shelf', 'deck'))),
+                    used, decision.reason))
 
     def in_loaded_place_descent(self):
         """sim-place-descent-watchdog-suspend-v1: True while the loaded place descent is IN FLIGHT -- the
@@ -3871,7 +3896,12 @@ class TransferController:
                             # fixed-z gate (place_contact_release) OR the contact-gated gate
                             # (place_release_on_contact, which keeps carton_z as its fallback trigger).
                             self._place_contact_release_z = None
-                            self._place_reapproach_count = 0
+                            # sim-place-reapproach-counter-terminates-v1: do NOT reset the re-approach counter
+                            # here. This descent-plan block re-runs on every bounded lateral re-approach (the
+                            # place->preplace->reorient->descent cycle), so zeroing it per re-descend held the
+                            # attempt count at "1/N" forever and the obstructed budget never exhausted -- the
+                            # run only ended on the re-issue-timeout e-stop (coldwin101b). The counter is scoped
+                            # to the whole place stage and resets once per operation in start().
                             _want_release_z = (self._carton_level.place_contact_release
                                                or getattr(self._carton_level, 'place_release_on_contact', False))
                             if (_want_release_z and s.placed_pose is not None and len(s.placed_pose) >= 3

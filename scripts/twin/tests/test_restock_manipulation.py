@@ -2176,3 +2176,16 @@ def test_start_tolerates_a_motion_without_reset_crash_budget():
     c = TransferController(motion, {'sku-box': PROFILE}, fixture_mode=True)
     c.start('transfer', JOB)                                # no AttributeError
     assert c.phase == 'observe'
+
+
+def test_start_resets_the_place_reapproach_counter_per_operation():
+    """sim-place-reapproach-counter-terminates-v1: the bounded lateral re-approach budget is scoped to the
+    whole place stage, so start() resets it ONCE per operation -- NOT the descent-plan block (which re-runs on
+    every re-descend and, when it held the reset, stuck the attempt count at 1/N forever, coldwin101b). A
+    fresh op starts at 0, and a stale count from a prior op is cleared at the next start()."""
+    c, _ = make_controller('collect')
+    assert c._place_reapproach_count == 0                   # fresh op: clean budget
+    c._place_reapproach_count = 2                           # simulate two re-approaches spent this op
+    c.phase = 'failed'                                      # the prior op ended (start() requires terminal)
+    c.start('collect', JOB)                                 # a NEW operation re-arms the budget
+    assert c._place_reapproach_count == 0

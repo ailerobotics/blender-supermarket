@@ -443,6 +443,48 @@ def test_cw90_reapproach_fails_by_name_if_descent_never_terminates():
     assert m.begins == []                                     # never re-issued into the in-flight descent
 
 
+# ============================== C') sim-place-reapproach-counter-terminates-v1: the re-descend does NOT reset
+
+def _place_controller_wide_bound(motion, reapproach_max=2):
+    """Like _place_controller but with a generous level bound, so the place descent PLAN is ACCEPTED and the
+    descent-plan block runs to completion (reaching the release-arm region where the stale reset used to
+    live) instead of being rejected for tilt -- lets the re-descend path be exercised on CPU."""
+    lc = cl.resolve_level_config({'place_release_on_contact': True, 'place_reapproach_max': reapproach_max,
+                                  'place_reapproach_shift_m': 0.03, 'trip': False,
+                                  'bound_deg': 10.0, 'preplace_gate_bound_deg': 9.0})
+    c = TransferController(
+        motion, {'sku-box': PROFILE}, fixture_mode=True, transport_joints=_SL_STOW,
+        staged_cart_swing=True, cart_pan_joint0=-0.8605, cart_tuck_shape=_SL_TUCK,
+        reposition_before_place=True, collect_place_preplace_shape=_SL_PREPLACE_SHAPE,
+        collect_place_wrist_guard=True, collect_place_straight_line=True, carton_level=lc,
+        fk_urdf=URDF, carry_wrist1_cap=0.65, carry_wrist2_min=0.0)
+    c.start('collect', dict(job_id='j', sku='sku-box', quantity=1, source_bin='b', shelf_id='s'))
+    c.phase, c.held, c.issued = 'place', True, False
+    c.poses = {'preplace': (0.5, 0.2, 0.32, 0., 0., 0., 1.), 'place': (0.5, 0.2, 0.2, 0., 0., 0., 1.)}
+    c.target_surface = (0.5, 0.2, 0.1, 0., 0., 0., 1.)
+    c.target_pose = (0.5, 0.2, 0.2, 0., 0., 0., 1.)
+    c._capture_level_up((0.0,) * 6)
+    c._place_reoriented = True                               # past the reorient leg -> the descent plan runs
+    return c
+
+
+@need_urdf
+def test_place_descent_replan_does_not_reset_the_reapproach_counter(capsys):
+    """coldwin101b root cause: the place descent-plan block re-runs on EVERY bounded lateral re-approach (the
+    place->preplace->reorient->descent cycle). It used to zero ``_place_reapproach_count`` there, so every
+    PLACE_OBSTRUCTED re-incremented from 0 and the attempt line stuck at ``1/2`` forever -- the budget never
+    exhausted and the run died on the re-issue-timeout e-stop. With the reset moved to start() (per op), a
+    re-descend must PRESERVE a counter already advanced this stage."""
+    m = GuardedMotion(state='idle')                          # terminal -> the descent begin() is allowed
+    c = _place_controller_wide_bound(m, reapproach_max=2)
+    c._place_reapproach_count = 1                            # one re-approach already spent this place stage
+    r = c.step(.05, _packet(c, 1.0, contact=True, placed_pose=(0.5, 0.2, 0.3, 0., 0., 0., 1.)))
+    out = capsys.readouterr().out
+    assert 'PLACE_CONTACT_RELEASE_ARM' in out                # the descent-plan block ran past where the reset was
+    assert r.status == 'running' and len(m.begins) == 1      # the re-descend was issued
+    assert c._place_reapproach_count == 1                    # NOT reset to 0 by the re-descend plan
+
+
 # ===================================================================== D) byte-identical when inert
 
 def test_no_pending_never_touches_the_cancel_protocol():
