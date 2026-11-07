@@ -141,7 +141,14 @@
   "place_reapproach_shift_m": 0.03,
   "release_reissue": true,
   "release_confirm_timeout_s": 8.0,
-  "release_reissue_log_every": 30
+  "release_reissue_log_every": 30,
+  "release_free_check": true,
+  "release_free_settle_ticks": 5,
+  "release_free_stable_eps_m": 0.005,
+  "release_free_rest_gap_m": 0.03,
+  "release_free_settle_window_ticks": 60,
+  "release_free_lift_dz_m": 0.06,
+  "release_free_follow_frac": 0.5
  },
  "preplace_convergence_stall_s": 30.0,
  "preplace_drift_recapture_rad": 0.05,
