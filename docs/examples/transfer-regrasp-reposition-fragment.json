@@ -1,0 +1,174 @@
+{
+  "_comment": "sim-transfer-regrasp-reposition-v1 (coldwin93): make the TRANSFER a real stage. coldwin93 ran couple + tow + uncouple + park on the GPU for the first time, then died at the transfer PICK: cuMotion could not inverse-kinematics-solve the near-face SIDE reach into the rollwagen +x cage mouth (INVERSE_KINEMATICS_FAILURE x10 -> PLAN_TOTAL_ATTEMPTS_CAP -> HOST_FAULT_ESTOP phase=approach, host-stack.log 1467-1957), and the observed store-shelf place target (2.39 m from the parked base) was out of reach. This fragment turns the transfer into: (1) a plannable pad-DOWN re-grasp THROUGH the open cage mouth (parked-cart cage published as world_obstacles so cuMotion routes the approach around the bars), then (2) a drive to a place-park computed from the endcap target (target within ~0.9 m of the base) before the place. Keys split across THREE consumers (a key in the wrong file silently never activates -- config_preflight guards it): HOST = ros_host_config.json (TransferController); RUNTIME = the mission runtime-config (isaac_bundle); ENV = both processes. OFF (keys absent) => byte-identical.",
+  "_HOST_keys": "merge into restock_manipulation/ros_host_config.json",
+  "transfer_regrasp": true,
+  "_transfer_regrasp_note": "sim-transfer-regrasp-reposition-v1: keep the DEFAULT vertical pad-DOWN pick poses for the live_pose TRANSFER PICK (approach to a standoff ABOVE the carton top, straight-line descend to the carton TOP, lift straight up) instead of the near-face SIDE reach cuMotion could not IK. Needs world_obstacles (below) so cuMotion routes the approach through the open +x mouth. REQUIRES RESTOCK_TRANSFER_MODE=live_pose + RESTOCK_TRANSFER_CARRY=wrist_guard.",
+  "transfer_service_carry": true,
+  "_transfer_service_carry_note": "sim-service-leg-carry-v1: the TRANSIT carry-hold so the picked carton is CARRIED to the place-park before placing (lift->tuck->TRANSIT->[base drive to shelf_approach]->preplace->place). Pair with the RUNTIME shelf_staging=true.",
+  "carton_level": true,
+  "_carton_level_note": "sim-carton-level-carry-v1: level the carried carton (fold goals) + arm the CARTON_TILT trip (bound 2 deg, NEVER loosened). The carried re-grasp withdraw + the carry stay parallel to the ground; check_transfer_regrasp proves the pad-down withdraw at 0.0 deg.",
+  "world_obstacles": [
+    {
+      "id": "rollwagen_cage",
+      "_excerpt": "2 of 50 cage bars shown; GENERATE the full set (see note)",
+      "boxes": [
+        {
+          "size": [
+            0.02500000037252903,
+            0.02500000037252903,
+            1.4500000476837158
+          ],
+          "center": [
+            -1.6523641504575655,
+            -0.3200924887945198,
+            0.42500000000000004
+          ],
+          "rpy": [
+            0.0,
+            0.0,
+            -0.0001745329251994215
+          ]
+        },
+        {
+          "size": [
+            0.02500000037252903,
+            0.02500000037252903,
+            1.4500000476837158
+          ],
+          "center": [
+            -1.652252449386005,
+            0.31990750145772284,
+            0.42500000000000004
+          ],
+          "rpy": [
+            0.0,
+            0.0,
+            -0.0001745329251994215
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rollwagen_deck",
+      "boxes": [
+        {
+          "size": [
+            0.800000011920929,
+            0.6800000071525574,
+            0.05000000074505806
+          ],
+          "center": [
+            -1.2723083057095161,
+            -0.00015881617963753314,
+            -0.3
+          ],
+          "rpy": [
+            0.0,
+            0.0,
+            -0.0001745329251994215
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rollwagen_shelf",
+      "boxes": [
+        {
+          "size": [
+            0.7599999904632568,
+            0.6399999856948853,
+            0.02500000037252903
+          ],
+          "center": [
+            -1.2723083057095161,
+            -0.00015881617963753314,
+            0.41999999999999993
+          ],
+          "rpy": [
+            0.0,
+            0.0,
+            -0.0001745329251994215
+          ]
+        }
+      ]
+    }
+  ],
+  "_world_obstacles_note": "sim-transfer-regrasp-reposition-v1: the PARKED rollwagen cage (PR 350 boxes) in the ur_base_link frame, so cuMotion plans the re-grasp approach through the open +x mouth around the bars. This is a GENERATED artifact (50 cage bars + deck + shelf; the drawbar tow hitch is excluded -- it overlaps the arm base and would reject every plan with INVALID_INITIAL_CSPACE). Only a 2-bar EXCERPT is shown here; GENERATE the full set from the PARKED CART PRIM world pose at boot (after uncouple the cart is NOT at the coupled hitch offset): `PYTHONPATH=scripts .venv-usd/bin/python scripts/check_transfer_regrasp.py --robot-park X Y YAWDEG --cart-park X Y YAWDEG --emit-config out.json`, then copy its world_obstacles into config['world_obstacles']. check_transfer_regrasp also PROVES the generated set clears the arm start config. The 2-bar excerpt shown above is from the coldwin93 nav-trace park (cart_pose_in_base [-1.2723, -0.0002, -0.5, -0.0002], an approximation of the prim).",
+  "preplace_cage_gate": {
+    "cart_pose": [
+      -1.2723,
+      -0.0002,
+      -0.5,
+      -0.0002
+    ]
+  },
+  "place_descent_cage_gate": {
+    "cart_pose": [
+      -1.2723,
+      -0.0002,
+      -0.5,
+      -0.0002
+    ]
+  },
+  "_cage_gate_note": "sim-place-descent-reach-wire-v1 (PR 366/376/377): the carried pre-place + place-descent cage-clearance gates, armed at the PARKED cart pose (same cart_pose_in_base as world_obstacles). Regenerate the cart_pose from the parked prim alongside world_obstacles.",
+  "_RUNTIME_keys": "merge into the mission runtime-config",
+  "shelf_staging": true,
+  "mission_poses": {
+    "shelf_staging": [
+      -3.875,
+      8.0,
+      -1.5707963267948966
+    ],
+    "shelf_approach": [
+      -3.05,
+      5.66719,
+      -1.570796
+    ],
+    "cart_parking": [
+      -3.875,
+      16.3,
+      1.5707963267948966
+    ]
+  },
+  "_shelf_approach_note": "sim-transfer-regrasp-reposition-v1: the place-park pose COMPUTED from the endcap target [-3.05, 4.826, 0.73] + the arm reach -- the carton-rest target 0.900 m from the arm base (reach_place 0.936 m, reach_preplace 0.994 m; all << the 1.3 m UR10 envelope), base facing the shelf. This REPLACES the authored shelf_approach [-3.05, 6.0, pi] whose reach was 1.217 m (envelope edge). Recompute for a different endcap: `twin.restock_manipulation.transfer_regrasp.place_park_pose(endcap_xyz, reach_m=0.9, carton_h=0.18)`; the nav feasibility of the park footprint is owned by the nav lane (same park-variance tolerance).",
+  "transfer_shelf_location": "G3_back_s2",
+  "transfer_ground_truth": {
+    "enabled": true,
+    "location": "G3_back_s2",
+    "target": [
+      -3.05,
+      4.826,
+      0.73
+    ],
+    "free_dimensions": [
+      0.7,
+      0.5,
+      0.5
+    ],
+    "ground_truth_pick": false,
+    "_note": "the sales-floor ENDCAP place target (scenario.initial_staging.target_surface_pose_world); resolve_transfer_place_target selects it under shelf_staging and fails loud on a mis-filed target."
+  },
+  "verify_ground_truth": {
+    "enabled": true,
+    "bay": {
+      "center_xy": [
+        -3.05,
+        4.826
+      ],
+      "size_xy": [
+        0.68,
+        0.48
+      ],
+      "top_z": 0.73
+    },
+    "_note": "sim-verify-region-endcap-v1: the post-place verify bay, centred ON the endcap place target."
+  },
+  "_ENV_vars": "export in BOTH the orchestrate and host processes",
+  "env": {
+    "RESTOCK_TRANSFER_MODE": "live_pose",
+    "RESTOCK_TRANSFER_CARRY": "wrist_guard",
+    "_note": "live_pose picks from the live sensed carton pose; wrist_guard keeps the place-side KDL IK in the clear wrist branch. transfer_regrasp needs BOTH."
+  },
+  "_cpu_proofs": "scripts/check_transfer_regrasp.py (cart_pose_in_base + world_obstacles clear the arm start; the pad-down approach/descent/lift/withdraw clear the cage by >= 30 mm; the carried withdraw 0.0 deg level; the place-park reach 0.90 m) -- TRANSFER_REGRASP PASS; scripts/twin/tests/test_transfer_regrasp.py (unit + the coldwin93 replay + the boot-path wiring: transfer_regrasp on keeps the vertical pad-down pick, off is the byte-identical near-face side pick). data/sim-transfer-regrasp-reposition-v1/report.md.",
+  "_acceptance": "On the next GPU run (coldwin93 relaunch with these keys): the transfer PICK plans a pad-down approach THROUGH the cage mouth (no INVERSE_KINEMATICS_FAILURE / PLAN_TOTAL_ATTEMPTS_CAP at phase=approach), grasps + welds the carton off the parked cart, lifts + withdraws it out the mouth level, the base drives to the computed shelf_approach, and the carton places on the endcap slot (G3_back_s2) within reach."
+}

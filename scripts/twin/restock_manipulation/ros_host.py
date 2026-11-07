@@ -269,6 +269,13 @@ def main():
         # mission runtime `shelf_staging: true`. Absent/False => a live_pose transfer stays tuck->preplace
         # (byte-identical). See controller._repositions_before_place + restock/runtime service-leg legs.
         transfer_service_carry=bool(config.get('transfer_service_carry', False)),
+        # sim-transfer-regrasp-reposition-v1 (coldwin93): re-grasp the carton off the PARKED cart through the
+        # open +x cage mouth with a pad-DOWN top grasp instead of the near-face SIDE reach cuMotion could not
+        # IK (INVERSE_KINEMATICS_FAILURE x10 -> PLAN_TOTAL_ATTEMPTS_CAP -> HOST_FAULT_ESTOP phase=approach).
+        # Needs the parked cart cage published as config['world_obstacles'] (from the parked prim pose, see
+        # twin.restock_manipulation.transfer_regrasp) so cuMotion routes the approach through the mouth.
+        # Scoped to a live_pose TRANSFER pick; absent/False => byte-identical (the near-face side pick).
+        transfer_regrasp=bool(config.get('transfer_regrasp', False)),
         # fm410 (run-316): physics grasp confirm -- the lift-probe carton-tracking threshold (m). The grasp
         # advances to carry only if the measured carton rose by >= this from the grasp-confirm baseline, so
         # the confirm reads physics, never the (arm-occluded) source camera. Absent => inert (byte-identical).
@@ -524,6 +531,10 @@ def main():
         'reposition_before_place': controller.reposition_before_place,
         # sim-service-leg-carry-v1: TRANSIT carry-hold for the shelf-staging live_pose transfer service leg
         'transfer_service_carry': controller.transfer_service_carry,
+        # sim-transfer-regrasp-reposition-v1: pad-down re-grasp through the cage mouth for the live_pose
+        # transfer PICK (True = the default vertical pick is kept instead of the near-face side reach;
+        # needs config['world_obstacles'] from the parked cart prim pose for cuMotion to route the mouth).
+        'transfer_regrasp': controller.transfer_regrasp,
         'transfer_mode': controller.transfer_mode,   # env RESTOCK_TRANSFER_MODE (None = off)
         'transfer_carry': sorted(controller.transfer_carry),   # env RESTOCK_TRANSFER_CARRY ([] = off)
         'sim_cart_place_policy': _policy is not None and bool(config.get('sim_cart_place_policy')),

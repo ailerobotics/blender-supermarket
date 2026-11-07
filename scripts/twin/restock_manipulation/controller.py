@@ -125,6 +125,7 @@ class TransferController:
                  release_detach_timeout_s: float = 0.0, transfer_preplace_reach_guard=None,
                  transfer_pick_wrist_guard: bool = False,
                  transfer_service_carry: bool = False,
+                 transfer_regrasp: bool = False,
                  esdf_boot_ack_grace_s: float = 0.0,
                  preplace_convergence_stall_s: float = 0.0, preplace_wrist_first: bool = False,
                  preplace_pan_first: bool = False,
@@ -168,6 +169,17 @@ class TransferController:
         # (which otherwise goes tuck -> preplace with no carry-hold). When set, _repositions_before_place()
         # is True for a live_pose transfer so the carry-hold is produced; the runtime drives the carry.
         self.transfer_service_carry = bool(transfer_service_carry)
+        # sim-transfer-regrasp-reposition-v1 (coldwin93, opt-in, default off => byte-identical): re-grasp the
+        # carton off the PARKED cart THROUGH the open +x cage mouth with a pad-DOWN top grasp (approach to a
+        # standoff ABOVE the carton inside the cage, descend to the carton top, lift, withdraw straight out
+        # the mouth), instead of the near-face SIDE reach that cuMotion could not inverse-kinematics-solve
+        # (INVERSE_KINEMATICS_FAILURE x10 -> PLAN_TOTAL_ATTEMPTS_CAP -> HOST_FAULT_ESTOP phase=approach). The
+        # parked cart cage is published as world_obstacles so cuMotion routes the approach through the mouth
+        # around the bars (the cart_cage_place mechanism, reversed, for the PICK). Scoped to a live_pose
+        # TRANSFER pick: when on, the observe block keeps the default vertical (pad-down) pick-side poses
+        # instead of overwriting them with the near_face side-grip ones. The place half is unchanged (the
+        # reposition service leg + the existing cage gates own it). See _uses_regrasp_pad_down.
+        self.transfer_regrasp = bool(transfer_regrasp)
         self.base_repositioned = False
         self._source_obs = None   # fm390: the matched source observation, for re-running the place policy
         # Opt-in SIM transfer workaround (env RESTOCK_TRANSFER_MODE, twin.restock_manipulation.transfer_mode,
@@ -1445,6 +1457,15 @@ class TransferController:
         cap = DEFAULT_WRIST1_CAP if self.carry_wrist1_cap is None else self.carry_wrist1_cap
         w2min = DEFAULT_WRIST2_MIN if self.carry_wrist2_min is None else self.carry_wrist2_min
         return (cap, w2min)
+
+    def _uses_regrasp_pad_down(self):
+        """sim-transfer-regrasp-reposition-v1: True when this move re-grasps the carton off the parked cart
+        with the pad-DOWN top grasp through the cage mouth -- a live_pose TRANSFER pick with transfer_regrasp
+        set. Scoped to the transfer operation (collect / non-live_pose / the unset key are byte-identical).
+        When True the observe block keeps the default vertical pick-side poses (approach/descent to the carton
+        TOP) instead of the near-face side-grip reach cuMotion could not IK (coldwin93)."""
+        return bool(self.transfer_regrasp and self._live_pose_transfer()
+                    and getattr(self, 'operation', None) == 'transfer')
 
     def _preplace_reach_guard(self):
         """sim-robust-transfer-preplace-reach-v1: the ``(max_droop, upright_seed)`` reach guard for the
@@ -3285,6 +3306,21 @@ class TransferController:
                     # live_pose: carton + bay are symmetric under a 180 deg yaw -- pick the representatives
                     # that keep the side-grip wall facing the arm (min worst-station reach).
                     self.poses, self.near_face = near_face_poses(self.pose_policy, source, target, p)
+                    if self._uses_regrasp_pad_down():
+                        # sim-transfer-regrasp-reposition-v1: re-grasp the carton off the PARKED cart through
+                        # the open +x cage mouth with a pad-DOWN top grasp. near_face_poses just set the pick
+                        # side to the SIDE-grip reach cuMotion could not IK inside the cage (coldwin93
+                        # INVERSE_KINEMATICS_FAILURE x10); restore the DEFAULT vertical (pad-down) pick poses
+                        # -- approach to a standoff ABOVE the carton top, straight-line descend to the carton
+                        # TOP, lift straight back up -- so cuMotion plans the approach through the mouth around
+                        # the published cage world_obstacles. The place side (preplace/place/retreat) stays as
+                        # near_face built it (the reposition service leg re-registers it at the shelf park).
+                        self.poses.update(approach=pose(source.pose, p.approach), contact=contact,
+                                          lift=pose(source.pose, p.approach))
+                        print('TRANSFER_REGRASP pad-down pick through the cage mouth: approach=%s contact=%s '
+                              '(default vertical pick restored; place side from near_face)'
+                              % (tuple(round(c, 3) for c in self.poses['approach'][:3]),
+                                 tuple(round(c, 3) for c in self.poses['contact'][:3])), flush=True)
                 else:
                     self.poses = self.pose_policy.build(source, target, p)
             if self.cart_cage_place:

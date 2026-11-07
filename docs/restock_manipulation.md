@@ -622,6 +622,44 @@ Recommended ON values (coldwin94): `docs/examples/place-pad-down-arrival-fragmen
 `scripts/check_place_pad_down_arrival.py`, `scripts/twin/tests/test_place_reorient.py`,
 `scripts/twin/tests/test_place_pad_down_arrival.py`; write-up: `data/sim-place-pad-down-arrival-v1/report.md`.
 
+## Cage-aware re-grasp off the parked cart + reposition (sim-transfer-regrasp-reposition-v1)
+
+coldwin93 ran the couple, the tow, the uncouple and the park on the GPU for the first time in the campaign, then
+the **TRANSFER died at first contact**: cuMotion could not inverse-kinematics-solve the live_pose transfer PICK's
+**near-face SIDE reach** into the rollwagen **+x cage mouth** — `trajopt: INVERSE_KINEMATICS_FAILURE` **ten times**
+(host-stack 1467–1952), `PLAN_TOTAL_ATTEMPTS_CAP dispatches=10` → `HOST_FAULT_ESTOP phase=approach`. The nvblox
+ESDF marks the cage bars + the carton occupied and `world_obstacles=[]` gave cuMotion no clean cart geometry, so
+every side-reach config into the mouth is in collision. The observed store-shelf place target
+(`place_surface=(2.175, 1.237, 0.186)` base, reach 2.39 m) was also > 2 m from the parked base — unreachable even
+after a successful pick. This lane turns the transfer into a real stage, opt-in (`transfer_regrasp` HOST key +
+`config['world_obstacles']` from the parked prim; default off ⇒ byte-identical).
+
+- **Pad-down re-grasp through the mouth** (`controller._uses_regrasp_pad_down`, a live_pose TRANSFER pick with
+  `transfer_regrasp` on): the observe block keeps the **default vertical pad-down** pick poses (approach to a
+  standoff **above** the carton top, straight-line descend to the carton **TOP**, lift straight up) instead of the
+  near-face side reach — the PR 376 pad-down geometry **reversed** for the pick. The parked rollwagen cage is
+  published as `world_obstacles` (the PR 350 boxes, from the **parked prim** pose — after uncouple the cart is NOT
+  at the coupled hitch offset) so cuMotion routes the approach **through the open mouth** around the bars, the same
+  mechanism `cart_cage_place` uses for the place. The grasp/seal/weld path is unchanged.
+- **Reposition before the place** (`transfer_service_carry` + `shelf_staging`): after the carried fold the base
+  drives to a **computed** `shelf_approach` — `transfer_regrasp.place_park_pose(endcap, reach_m=0.9, carton_h)`
+  parks the base so the endcap target sits **within ~0.9 m** of the arm base facing the shelf (reach_place 0.936 m,
+  reach_preplace 0.994 m; the authored `[-3.05, 6.0, π]` was 1.217 m at the envelope edge), then places.
+- **CPU proofs** — `scripts/twin/restock_manipulation/transfer_regrasp.py`: `cart_pose_in_base` (parked-prim →
+  ur_base_link), `parked_cart_world_obstacles` + `check_regrasp_obstacles_clear_arm` (the cage clears the arm start
+  config — a world obstacle overlapping it rejects every plan, INVALID_INITIAL_CSPACE; the **drawbar** tow hitch is
+  excluded, it overlaps the arm base), `mouth_pad_down_path` + `regrasp_cage_clearance` (the
+  approach/descent/lift/withdraw clear every non-support cage body ≥ 30 mm via the place-clearance sweep tool),
+  `carried_withdraw_level_ok` (the carried withdraw stays within the **2.0°** level bound, never loosened), and
+  `place_park_pose` / `place_reach_ok` (the reposition reach + the level descent onto the shelf top 0.73). One
+  command: `scripts/check_transfer_regrasp.py` (`TRANSFER_REGRASP PASS`, `--emit-config` writes the ON block).
+
+The CPU sweep proves the pad-down path is **geometrically** clear of the cage (the precondition the side reach
+lacked) and the top-down orientation keeps the gripper above the carton clear of the mid-height bars; the final
+IK plannability is the GPU cuMotion plan. ON values + the next-run acceptance:
+`docs/examples/transfer-regrasp-reposition-fragment.json`; tests: `scripts/twin/tests/test_transfer_regrasp.py`;
+write-up: `data/sim-transfer-regrasp-reposition-v1/report.md`.
+
 ## Contact-gated place-descent release (sim-place-release-on-contact-v1)
 
 The collect deck set-down releases the weld the instant the support is **actually touched**, not at a
